@@ -9,6 +9,7 @@ services:
       OPENCLAW_ADMIN_PASSWORD: change-me-now
       OPENCLAW_ADMIN_DISPLAY_NAME: Administrator
       OpenClaw__ApiKeyEncryptionKey: change-this-key
+      OpenClaw__SandboxHealthCheckIntervalSeconds: 60
     ports:
       - "8088:8080"
     volumes:

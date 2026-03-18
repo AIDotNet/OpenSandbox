@@ -9,6 +9,7 @@ public sealed class Sandbox
     public SandboxStatus? Status { get; set; }
     public DateTimeOffset? CreatedAt { get; set; }
     public DateTimeOffset? ExpiresAt { get; set; }
+    public bool NeverExpires { get; set; }
 }
 
 public sealed class CreatedSandbox
@@ -18,6 +19,7 @@ public sealed class CreatedSandbox
     public Dictionary<string, string>? Metadata { get; set; }
     public DateTimeOffset? CreatedAt { get; set; }
     public DateTimeOffset? ExpiresAt { get; set; }
+    public bool NeverExpires { get; set; }
     public List<string> Entrypoint { get; set; } = new();
 }
 
@@ -55,6 +57,12 @@ public sealed class CommandExecutionResult
 public sealed class RenewSandboxExpirationResult
 {
     public DateTimeOffset? ExpiresAt { get; set; }
+    public bool NeverExpires { get; set; }
+}
+
+public sealed class SandboxLogsResult
+{
+    public List<string> Lines { get; set; } = new();
 }
 
 public sealed class SandboxFileEntry

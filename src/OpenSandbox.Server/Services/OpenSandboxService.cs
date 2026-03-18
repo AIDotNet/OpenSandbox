@@ -316,6 +316,19 @@ public sealed class OpenSandboxService(
         return ToInfoResponse(record);
     }
 
+    public async Task<SandboxInfoResponse?> RestartAsync(string id, CancellationToken cancellationToken)
+    {
+        var record = await GetActiveRecordAsync(id, cancellationToken);
+        if (record == null)
+        {
+            return null;
+        }
+
+        await runtime.RestartAsync(record.ContainerName, cancellationToken);
+        await RefreshRecordAsync(record, cancellationToken, save: true);
+        return ToInfoResponse(record);
+    }
+
     public async Task<RenewSandboxExpirationResponse?> RenewAsync(string id, DateTimeOffset expiresAt, CancellationToken cancellationToken)
     {
         var record = await GetActiveRecordAsync(id, cancellationToken);

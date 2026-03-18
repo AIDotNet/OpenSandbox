@@ -27,8 +27,8 @@ public sealed class AdminBootstrapper(
         {
             var template = new DeploymentTemplate
             {
-                Name = "官方模板",
-                Description = "OpenClaw 官方部署模板",
+                Name = "官方 OpenClaw 模板",
+                Description = "按 OpenClaw 官方 Docker 文档预置的部署模板",
                 IsBuiltin = true,
                 IsEnabled = true
             };
@@ -36,12 +36,12 @@ public sealed class AdminBootstrapper(
             {
                 Template = template,
                 Version = "v1",
-                Image = "ghcr.io/aidotnet/openclaw:latest",
-                ContainerPort = 3000,
+                Image = "ghcr.io/openclaw/openclaw:latest",
+                ContainerPort = 18789,
                 CommandJson = "[]",
-                ConfigMountPath = "/app/config",
+                ConfigMountPath = "/home/node/.openclaw",
                 ConfigFileName = "openclaw.json",
-                WorkspaceMountPath = "/app/data",
+                WorkspaceMountPath = "/home/node/.openclaw/workspace",
                 IsActive = true
             };
             template.CurrentVersionId = version.Id;

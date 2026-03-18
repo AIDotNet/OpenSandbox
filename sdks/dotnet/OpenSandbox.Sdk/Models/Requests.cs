@@ -13,6 +13,7 @@ public sealed class CreateSandboxRequest
     public SandboxImageReference Image { get; set; } = new();
     public List<string>? Entrypoint { get; set; }
     public int Timeout { get; set; }
+    public bool NeverExpires { get; set; }
     public SandboxResourceLimits? ResourceLimits { get; set; }
     public Dictionary<string, string>? Env { get; set; }
     public Dictionary<string, string>? Metadata { get; set; }

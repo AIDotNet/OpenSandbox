@@ -7,7 +7,10 @@
       "launchBrowser": false,
       "applicationUrl": "http://localhost:5091",
       "environmentVariables": {
-        "ASPNETCORE_ENVIRONMENT": "Development"
+        "ASPNETCORE_ENVIRONMENT": "Development",
+        "OPENCLAW_ADMIN_USERNAME": "admin",
+        "OPENCLAW_ADMIN_PASSWORD": "admin123456",
+        "OPENCLAW_ADMIN_DISPLAY_NAME": "Administrator"
       }
     },
     "https": {
@@ -16,7 +19,10 @@
       "launchBrowser": false,
       "applicationUrl": "https://localhost:7037;http://localhost:5091",
       "environmentVariables": {
-        "ASPNETCORE_ENVIRONMENT": "Development"
+        "ASPNETCORE_ENVIRONMENT": "Development",
+        "OPENCLAW_ADMIN_USERNAME": "admin",
+        "OPENCLAW_ADMIN_PASSWORD": "admin123456",
+        "OPENCLAW_ADMIN_DISPLAY_NAME": "Administrator"
       }
     }
   }

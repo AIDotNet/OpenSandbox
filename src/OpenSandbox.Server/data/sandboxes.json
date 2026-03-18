@@ -1,1 +1,48 @@
-[]
+[
+  {
+    "id": "508c5a46-3e73-4e16-8a3b-5b51f0cf177e",
+    "containerName": "opensandbox-2d1d52caf6d24c8380340df334489b79",
+    "containerId": "ac88cc57608be23bdc473e60bed2afa74fc01a679b992c32f7271f7c854d30a6",
+    "image": "ghcr.io/openclaw/openclaw:latest",
+    "entrypoint": [],
+    "metadata": {
+      "userId": "49cba691-2012-4e41-8ebb-2ea6a01274c0",
+      "userName": "admin",
+      "templateId": "00e9ee8e-f9e4-4059-803b-5879fad32227",
+      "templateVersionId": "e8c14681-1062-43f2-8c2e-5e5748d3a1e0",
+      "sandboxServerId": "9aa05acd-9ded-4379-8b29-7f989597aaf6"
+    },
+    "env": null,
+    "volumes": [
+      {
+        "name": "openclaw-config",
+        "mountPath": "/home/node/.openclaw/openclaw.json",
+        "readOnly": null,
+        "subPath": null,
+        "host": {
+          "path": "D:\\data\\admin\\openclaw.json"
+        }
+      },
+      {
+        "name": "openclaw-data",
+        "mountPath": "/home/node/.openclaw/workspace",
+        "readOnly": null,
+        "subPath": null,
+        "host": {
+          "path": "D:\\data\\admin"
+        }
+      }
+    ],
+    "resourceLimits": {
+      "cpu": "1000m",
+      "memory": "1Gi"
+    },
+    "timeoutSeconds": null,
+    "neverExpires": true,
+    "createdAt": "2026-03-18T06:05:23.0704248+00:00",
+    "expiresAt": null,
+    "lastKnownState": "Error",
+    "lastKnownReason": "exited",
+    "lastKnownMessage": "Container exited with code 1"
+  }
+]

@@ -9,6 +9,7 @@ public interface ISandboxRuntime
     Task DeleteAsync(string containerName, CancellationToken cancellationToken);
     Task PauseAsync(string containerName, CancellationToken cancellationToken);
     Task ResumeAsync(string containerName, CancellationToken cancellationToken);
+    Task RestartAsync(string containerName, CancellationToken cancellationToken);
     Task<SandboxRuntimeState?> InspectAsync(string containerName, CancellationToken cancellationToken);
     Task<int?> GetPublishedPortAsync(string containerName, int containerPort, CancellationToken cancellationToken);
     Task<SandboxRuntimeUsage?> GetUsageAsync(string containerName, CancellationToken cancellationToken);

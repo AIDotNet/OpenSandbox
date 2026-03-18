@@ -1,21 +1,21 @@
-# shadcn/ui monorepo template
+# React + TypeScript + Vite + shadcn/ui
 
-This is a Vite monorepo template with shadcn/ui.
+This is a template for a new Vite project with React, TypeScript, and shadcn/ui.
 
 ## Adding components
 
-To add components to your app, run the following command at the root of your `web` app:
+To add components to your app, run the following command:
 
 ```bash
-pnpm dlx shadcn@latest add button -c apps/web
+npx shadcn@latest add button
 ```
 
-This will place the ui components in the `packages/ui/src/components` directory.
+This will place the ui components in the `src/components` directory.
 
 ## Using components
 
-To use the components in your app, import them from the `ui` package.
+To use the components in your app, import them as follows:
 
 ```tsx
-import { Button } from "@workspace/ui/components/button";
+import { Button } from "@/components/ui/button"
 ```

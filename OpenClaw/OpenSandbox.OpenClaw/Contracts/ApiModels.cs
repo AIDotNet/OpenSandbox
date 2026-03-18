@@ -10,3 +10,5 @@ public sealed record SystemSettingsRequest(string DefaultCpu, string DefaultMemo
 public sealed record TemplateRequest(string Name, string Description, bool IsEnabled);
 public sealed record TemplateVersionRequest(string Version, string Image, int ContainerPort, List<string> Command, string ConfigMountPath, string ConfigFileName, string WorkspaceMountPath, bool IsActive);
 public sealed record DeployRequest(Guid SandboxServerId, Guid TemplateId, string ApiEndpoint, string ApiType, string Model, string ApiKey);
+public sealed record DeploymentWriteFileRequest(string Path, string ContentBase64);
+public sealed record DeploymentCreateDirectoryRequest(string Path);

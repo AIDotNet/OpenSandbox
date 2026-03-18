@@ -1,7 +1,10 @@
+using System.Net.WebSockets;
+using System.Reflection;
 using System.Security.Claims;
 using Microsoft.AspNetCore.Authentication;
 using Microsoft.AspNetCore.Authentication.Cookies;
 using Microsoft.AspNetCore.Authorization;
+using Microsoft.AspNetCore.DataProtection;
 using Microsoft.Extensions.FileProviders;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Options;
@@ -10,31 +13,37 @@ using OpenSandbox.OpenClaw.Data;
 using OpenSandbox.OpenClaw.Domain;
 using OpenSandbox.OpenClaw.Options;
 using OpenSandbox.OpenClaw.Services;
+using OpenSandbox.Server.Contracts;
 
 var builder = WebApplication.CreateBuilder(args);
 
 builder.Services.Configure<OpenClawOptions>(builder.Configuration.GetSection(OpenClawOptions.SectionName));
 builder.Services.Configure<AdminBootstrapOptions>(builder.Configuration.GetSection(AdminBootstrapOptions.SectionName));
-builder.Services.AddSingleton(sp =>
-{
-    var options = sp.GetRequiredService<IOptions<OpenClawOptions>>().Value;
-    var path = Path.IsPathRooted(options.DatabasePath)
-        ? options.DatabasePath
-        : Path.Combine(builder.Environment.ContentRootPath, options.DatabasePath);
-    Directory.CreateDirectory(Path.GetDirectoryName(path)!);
-    return path;
-});
+
+var configuredDatabasePath = builder.Configuration.GetValue<string>($"{OpenClawOptions.SectionName}:DatabasePath") ?? "data/openclaw.db";
+var databasePath = Path.IsPathRooted(configuredDatabasePath)
+    ? configuredDatabasePath
+    : Path.Combine(builder.Environment.ContentRootPath, configuredDatabasePath);
+var databaseDirectory = Path.GetDirectoryName(databasePath)!;
+Directory.CreateDirectory(databaseDirectory);
+var dataProtectionPath = Path.Combine(databaseDirectory, "keys");
+Directory.CreateDirectory(dataProtectionPath);
+
+builder.Services.AddSingleton(databasePath);
 builder.Services.AddDbContext<OpenClawDbContext>((sp, options) =>
 {
-    var databasePath = sp.GetRequiredService<string>();
-    options.UseSqlite($"Data Source={databasePath}");
+    var resolvedDatabasePath = sp.GetRequiredService<string>();
+    options.UseSqlite($"Data Source={resolvedDatabasePath}");
 });
+builder.Services.AddDataProtection()
+    .PersistKeysToFileSystem(new DirectoryInfo(dataProtectionPath));
 builder.Services.AddHttpClient(nameof(OpenSandboxGateway));
 builder.Services.AddScoped<PasswordService>();
 builder.Services.AddScoped<SecretProtector>();
 builder.Services.AddScoped<OpenSandboxGateway>();
 builder.Services.AddScoped<DeploymentService>();
 builder.Services.AddScoped<AdminBootstrapper>();
+builder.Services.AddHostedService<SandboxServerHealthBackgroundService>();
 builder.Services.AddAuthentication(CookieAuthenticationDefaults.AuthenticationScheme)
     .AddCookie(options =>
     {
@@ -65,7 +74,7 @@ builder.Services.AddCors(options =>
 
 var app = builder.Build();
 
-var webDistPath = Path.GetFullPath(Path.Combine(builder.Environment.ContentRootPath, "..", "web", "apps", "web", "dist"));
+var webDistPath = Path.GetFullPath(Path.Combine(builder.Environment.ContentRootPath, "..", "web", "dist"));
 if (Directory.Exists(webDistPath))
 {
     var fileProvider = new PhysicalFileProvider(webDistPath);
@@ -87,6 +96,12 @@ app.UseSwagger();
 app.UseSwaggerUI();
 
 var api = app.MapGroup("/api");
+
+api.MapGet("/meta", () => Results.Ok(new
+{
+    application = "OpenClaw",
+    version = GetApplicationVersion()
+}));
 
 api.MapPost("/auth/login", async (LoginRequest request, OpenClawDbContext dbContext, PasswordService passwordService, HttpContext httpContext, CancellationToken cancellationToken) =>
 {
@@ -148,9 +163,20 @@ admin.MapPut("/users/{id:guid}", async (Guid id, UpdateUserRequest request, Open
         return Results.NotFound();
     }
 
+    var nextRole = Enum.TryParse<UserRole>(request.Role, true, out var parsedRole) ? parsedRole : user.Role;
+    var nextStatus = Enum.TryParse<UserStatus>(request.Status, true, out var parsedStatus) ? parsedStatus : user.Status;
+    if (user.Role == UserRole.Admin && (nextRole != UserRole.Admin || nextStatus != UserStatus.Active))
+    {
+        var activeAdminCount = await dbContext.Users.CountAsync(x => x.Role == UserRole.Admin && x.Status == UserStatus.Active, cancellationToken);
+        if (activeAdminCount <= 1)
+        {
+            return Results.BadRequest(new { message = "至少保留一个启用中的管理员" });
+        }
+    }
+
     user.DisplayName = request.DisplayName.Trim();
-    user.Role = Enum.TryParse<UserRole>(request.Role, true, out var parsedRole) ? parsedRole : user.Role;
-    user.Status = Enum.TryParse<UserStatus>(request.Status, true, out var parsedStatus) ? parsedStatus : user.Status;
+    user.Role = nextRole;
+    user.Status = nextStatus;
     await dbContext.SaveChangesAsync(cancellationToken);
     return Results.Ok();
 });
@@ -168,8 +194,53 @@ admin.MapPost("/users/{id:guid}/password", async (Guid id, ResetPasswordRequest 
     return Results.Ok();
 });
 
+admin.MapDelete("/users/{id:guid}", async (Guid id, ClaimsPrincipal principal, OpenClawDbContext dbContext, CancellationToken cancellationToken) =>
+{
+    var currentUser = await GetCurrentUserAsync(principal, dbContext, cancellationToken);
+    var user = await dbContext.Users.FirstOrDefaultAsync(x => x.Id == id, cancellationToken);
+    if (user == null)
+    {
+        return Results.NotFound();
+    }
+
+    if (currentUser?.Id == user.Id)
+    {
+        return Results.BadRequest(new { message = "不能删除当前登录账号" });
+    }
+
+    if (user.Role == UserRole.Admin)
+    {
+        var adminCount = await dbContext.Users.CountAsync(x => x.Role == UserRole.Admin && x.Status == UserStatus.Active, cancellationToken);
+        if (adminCount <= 1)
+        {
+            return Results.BadRequest(new { message = "至少保留一个启用中的管理员" });
+        }
+    }
+
+    var hasDeployments = await dbContext.DeploymentInstances.AnyAsync(x => x.UserId == id, cancellationToken);
+    if (hasDeployments)
+    {
+        return Results.BadRequest(new { message = "该用户仍有关联部署实例，不能删除" });
+    }
+
+    dbContext.Users.Remove(user);
+    await dbContext.SaveChangesAsync(cancellationToken);
+    return Results.NoContent();
+});
+
 admin.MapGet("/sandbox-servers", async (OpenClawDbContext dbContext, CancellationToken cancellationToken) =>
-    Results.Ok(await dbContext.SandboxServers.OrderBy(x => x.Name).ToListAsync(cancellationToken)));
+    Results.Ok(await dbContext.SandboxServers.OrderBy(x => x.Name).Select(x => new
+    {
+        x.Id,
+        x.Name,
+        x.BaseUrl,
+        x.ApiToken,
+        x.PersistentRootPath,
+        x.IsEnabled,
+        HealthStatus = x.HealthStatus.ToString(),
+        x.LastCheckedAt,
+        x.LastHealthMessage
+    }).ToListAsync(cancellationToken)));
 
 admin.MapPost("/sandbox-servers", async (SandboxServerRequest request, OpenClawDbContext dbContext, CancellationToken cancellationToken) =>
 {
@@ -228,6 +299,25 @@ admin.MapPost("/sandbox-servers/{id:guid}/health", async (Guid id, OpenClawDbCon
     return Results.Ok(entity);
 });
 
+admin.MapDelete("/sandbox-servers/{id:guid}", async (Guid id, OpenClawDbContext dbContext, CancellationToken cancellationToken) =>
+{
+    var entity = await dbContext.SandboxServers.FirstOrDefaultAsync(x => x.Id == id, cancellationToken);
+    if (entity == null)
+    {
+        return Results.NotFound();
+    }
+
+    var inUse = await dbContext.DeploymentInstances.AnyAsync(x => x.SandboxServerId == id, cancellationToken);
+    if (inUse)
+    {
+        return Results.BadRequest(new { message = "该沙盒服务端仍有关联部署实例，不能删除" });
+    }
+
+    dbContext.SandboxServers.Remove(entity);
+    await dbContext.SaveChangesAsync(cancellationToken);
+    return Results.NoContent();
+});
+
 admin.MapGet("/settings", async (OpenClawDbContext dbContext, CancellationToken cancellationToken) =>
     Results.Ok(await dbContext.SystemSettings.FirstAsync(cancellationToken)));
 
@@ -242,7 +332,38 @@ admin.MapPut("/settings", async (SystemSettingsRequest request, OpenClawDbContex
 });
 
 admin.MapGet("/templates", async (OpenClawDbContext dbContext, CancellationToken cancellationToken) =>
-    Results.Ok(await dbContext.Templates.Include(x => x.Versions.OrderByDescending(v => v.CreatedAt)).ToListAsync(cancellationToken)));
+{
+    var templates = await dbContext.Templates
+        .Include(x => x.Versions)
+        .OrderBy(x => x.Name)
+        .ToListAsync(cancellationToken);
+
+    return Results.Ok(templates.Select(x => new
+    {
+        x.Id,
+        x.Name,
+        x.Description,
+        x.IsBuiltin,
+        x.IsEnabled,
+        x.CurrentVersionId,
+        Versions = x.Versions
+            .OrderByDescending(v => v.CreatedAt)
+            .Select(v => new
+            {
+                v.Id,
+                v.Version,
+                v.Image,
+                v.ContainerPort,
+                v.ConfigMountPath,
+                v.ConfigFileName,
+                v.WorkspaceMountPath,
+                v.IsActive,
+                v.CreatedAt,
+                Command = System.Text.Json.JsonSerializer.Deserialize<List<string>>(v.CommandJson) ?? new List<string>()
+            })
+            .ToList()
+    }));
+});
 
 admin.MapPost("/templates", async (TemplateRequest request, OpenClawDbContext dbContext, CancellationToken cancellationToken) =>
 {
@@ -258,6 +379,15 @@ admin.MapPost("/templates/{id:guid}/versions", async (Guid id, TemplateVersionRe
     if (template == null)
     {
         return Results.NotFound();
+    }
+
+    if (request.IsActive)
+    {
+        var oldVersions = await dbContext.TemplateVersions.Where(x => x.TemplateId == id && x.IsActive).ToListAsync(cancellationToken);
+        foreach (var oldVersion in oldVersions)
+        {
+            oldVersion.IsActive = false;
+        }
     }
 
     var version = new DeploymentTemplateVersion
@@ -276,6 +406,25 @@ admin.MapPost("/templates/{id:guid}/versions", async (Guid id, TemplateVersionRe
     template.CurrentVersionId = version.Id;
     await dbContext.SaveChangesAsync(cancellationToken);
     return Results.Ok(version);
+});
+
+admin.MapDelete("/templates/{id:guid}", async (Guid id, OpenClawDbContext dbContext, CancellationToken cancellationToken) =>
+{
+    var template = await dbContext.Templates.FirstOrDefaultAsync(x => x.Id == id, cancellationToken);
+    if (template == null)
+    {
+        return Results.NotFound();
+    }
+
+    var inUse = await dbContext.DeploymentInstances.AnyAsync(x => x.TemplateId == id, cancellationToken);
+    if (inUse)
+    {
+        return Results.BadRequest(new { message = "该模板仍有关联部署实例，不能删除" });
+    }
+
+    dbContext.Templates.Remove(template);
+    await dbContext.SaveChangesAsync(cancellationToken);
+    return Results.NoContent();
 });
 
 api.MapGet("/sandbox-servers", async (OpenClawDbContext dbContext, CancellationToken cancellationToken) =>
@@ -300,11 +449,14 @@ api.MapGet("/deployments", async (ClaimsPrincipal principal, OpenClawDbContext d
         query = query.Where(x => x.UserId == user.Id);
     }
 
-    var items = await query.OrderByDescending(x => x.UpdatedAt).ToListAsync(cancellationToken);
-    return Results.Ok(items.Select(x => new
+    var items = await query.ToListAsync(cancellationToken);
+    return Results.Ok(items
+        .OrderByDescending(x => x.UpdatedAt)
+        .Select(x => new
     {
         x.Id,
         x.SandboxId,
+        x.ContainerId,
         x.ApiEndpoint,
         x.ApiType,
         x.Model,
@@ -344,6 +496,42 @@ api.MapGet("/deployments/{id:guid}", async (Guid id, ClaimsPrincipal principal, 
     return detail == null ? Results.NotFound() : Results.Ok(detail);
 }).RequireAuthorization();
 
+api.MapGet("/containers/{containerId}", async (string containerId, ClaimsPrincipal principal, OpenClawDbContext dbContext, DeploymentService deploymentService, CancellationToken cancellationToken) =>
+{
+    var user = await GetCurrentUserAsync(principal, dbContext, cancellationToken);
+    if (user == null)
+    {
+        return Results.Unauthorized();
+    }
+
+    var instance = await dbContext.DeploymentInstances.FirstOrDefaultAsync(x => x.ContainerId == containerId, cancellationToken);
+    if (instance == null || !CanAccess(user, instance))
+    {
+        return Results.NotFound();
+    }
+
+    var detail = await deploymentService.GetDeploymentDetailAsync(instance.Id, cancellationToken);
+    return detail == null ? Results.NotFound() : Results.Ok(detail);
+}).RequireAuthorization();
+
+api.MapDelete("/deployments/{id:guid}", async (Guid id, ClaimsPrincipal principal, OpenClawDbContext dbContext, DeploymentService deploymentService, CancellationToken cancellationToken) =>
+{
+    var user = await GetCurrentUserAsync(principal, dbContext, cancellationToken);
+    if (user == null)
+    {
+        return Results.Unauthorized();
+    }
+
+    var instance = await dbContext.DeploymentInstances.FirstOrDefaultAsync(x => x.Id == id, cancellationToken);
+    if (instance == null || !CanAccess(user, instance))
+    {
+        return Results.NotFound();
+    }
+
+    var deleted = await deploymentService.DeleteDeploymentAsync(id, cancellationToken);
+    return deleted ? Results.NoContent() : Results.NotFound();
+}).RequireAuthorization();
+
 api.MapGet("/deployments/{id:guid}/logs", async (Guid id, ClaimsPrincipal principal, OpenClawDbContext dbContext, OpenSandboxGateway gateway, CancellationToken cancellationToken, int? tail) =>
 {
     var user = await GetCurrentUserAsync(principal, dbContext, cancellationToken);
@@ -361,6 +549,150 @@ api.MapGet("/deployments/{id:guid}/logs", async (Guid id, ClaimsPrincipal princi
     var settings = await dbContext.SystemSettings.FirstAsync(cancellationToken);
     var result = await gateway.GetLogsAsync(instance.SandboxServer.BaseUrl, instance.SandboxServer.ApiToken, instance.SandboxId, tail ?? settings.DefaultLogTailLines, cancellationToken);
     return result == null ? Results.NotFound() : Results.Ok(result);
+}).RequireAuthorization();
+
+api.MapGet("/containers/{containerId}/logs", async (string containerId, ClaimsPrincipal principal, OpenClawDbContext dbContext, OpenSandboxGateway gateway, CancellationToken cancellationToken, int? tail) =>
+{
+    var user = await GetCurrentUserAsync(principal, dbContext, cancellationToken);
+    if (user == null)
+    {
+        return Results.Unauthorized();
+    }
+
+    var instance = await dbContext.DeploymentInstances.Include(x => x.SandboxServer).FirstOrDefaultAsync(x => x.ContainerId == containerId, cancellationToken);
+    if (instance == null || instance.SandboxServer == null || !CanAccess(user, instance) || string.IsNullOrWhiteSpace(instance.SandboxId))
+    {
+        return Results.NotFound();
+    }
+
+    var settings = await dbContext.SystemSettings.FirstAsync(cancellationToken);
+    var result = await gateway.GetLogsAsync(instance.SandboxServer.BaseUrl, instance.SandboxServer.ApiToken, instance.SandboxId, tail ?? settings.DefaultLogTailLines, cancellationToken);
+    return result == null ? Results.NotFound() : Results.Ok(result);
+}).RequireAuthorization();
+
+api.MapGet("/containers/{containerId}/files", async (string containerId, string? path, ClaimsPrincipal principal, OpenClawDbContext dbContext, OpenSandboxGateway gateway, CancellationToken cancellationToken) =>
+{
+    var user = await GetCurrentUserAsync(principal, dbContext, cancellationToken);
+    if (user == null)
+    {
+        return Results.Unauthorized();
+    }
+
+    var instance = await dbContext.DeploymentInstances.Include(x => x.SandboxServer).FirstOrDefaultAsync(x => x.ContainerId == containerId, cancellationToken);
+    if (instance == null || instance.SandboxServer == null || !CanAccess(user, instance) || string.IsNullOrWhiteSpace(instance.SandboxId))
+    {
+        return Results.NotFound();
+    }
+
+    try
+    {
+        var result = await gateway.ListFilesAsync(instance.SandboxServer.BaseUrl, instance.SandboxServer.ApiToken, instance.SandboxId, path ?? "/", cancellationToken);
+        return result == null ? Results.NotFound() : Results.Ok(result);
+    }
+    catch (InvalidOperationException ex)
+    {
+        return Results.Problem(ex.Message, statusCode: StatusCodes.Status502BadGateway, title: "上游沙盒文件列表失败");
+    }
+}).RequireAuthorization();
+
+api.MapGet("/containers/{containerId}/files/content", async (string containerId, string path, ClaimsPrincipal principal, OpenClawDbContext dbContext, OpenSandboxGateway gateway, CancellationToken cancellationToken) =>
+{
+    var user = await GetCurrentUserAsync(principal, dbContext, cancellationToken);
+    if (user == null)
+    {
+        return Results.Unauthorized();
+    }
+
+    var instance = await dbContext.DeploymentInstances.Include(x => x.SandboxServer).FirstOrDefaultAsync(x => x.ContainerId == containerId, cancellationToken);
+    if (instance == null || instance.SandboxServer == null || !CanAccess(user, instance) || string.IsNullOrWhiteSpace(instance.SandboxId))
+    {
+        return Results.NotFound();
+    }
+
+    try
+    {
+        var result = await gateway.ReadFileAsync(instance.SandboxServer.BaseUrl, instance.SandboxServer.ApiToken, instance.SandboxId, path, cancellationToken);
+        return result == null ? Results.NotFound() : Results.Ok(result);
+    }
+    catch (InvalidOperationException ex)
+    {
+        return Results.Problem(ex.Message, statusCode: StatusCodes.Status502BadGateway, title: "上游沙盒文件读取失败");
+    }
+}).RequireAuthorization();
+
+api.MapPost("/containers/{containerId}/files/content", async (string containerId, DeploymentWriteFileRequest request, ClaimsPrincipal principal, OpenClawDbContext dbContext, OpenSandboxGateway gateway, CancellationToken cancellationToken) =>
+{
+    var user = await GetCurrentUserAsync(principal, dbContext, cancellationToken);
+    if (user == null)
+    {
+        return Results.Unauthorized();
+    }
+
+    var instance = await dbContext.DeploymentInstances.Include(x => x.SandboxServer).FirstOrDefaultAsync(x => x.ContainerId == containerId, cancellationToken);
+    if (instance == null || instance.SandboxServer == null || !CanAccess(user, instance) || string.IsNullOrWhiteSpace(instance.SandboxId))
+    {
+        return Results.NotFound();
+    }
+
+    try
+    {
+        var ok = await gateway.WriteFileAsync(instance.SandboxServer.BaseUrl, instance.SandboxServer.ApiToken, instance.SandboxId, new WriteFileRequest { Path = request.Path, ContentBase64 = request.ContentBase64 }, cancellationToken);
+        return ok ? Results.Ok() : Results.NotFound();
+    }
+    catch (InvalidOperationException ex)
+    {
+        return Results.Problem(ex.Message, statusCode: StatusCodes.Status502BadGateway, title: "上游沙盒文件保存失败");
+    }
+}).RequireAuthorization();
+
+api.MapPost("/containers/{containerId}/directories", async (string containerId, DeploymentCreateDirectoryRequest request, ClaimsPrincipal principal, OpenClawDbContext dbContext, OpenSandboxGateway gateway, CancellationToken cancellationToken) =>
+{
+    var user = await GetCurrentUserAsync(principal, dbContext, cancellationToken);
+    if (user == null)
+    {
+        return Results.Unauthorized();
+    }
+
+    var instance = await dbContext.DeploymentInstances.Include(x => x.SandboxServer).FirstOrDefaultAsync(x => x.ContainerId == containerId, cancellationToken);
+    if (instance == null || instance.SandboxServer == null || !CanAccess(user, instance) || string.IsNullOrWhiteSpace(instance.SandboxId))
+    {
+        return Results.NotFound();
+    }
+
+    try
+    {
+        var ok = await gateway.CreateDirectoryAsync(instance.SandboxServer.BaseUrl, instance.SandboxServer.ApiToken, instance.SandboxId, new CreateDirectoryRequest { Path = request.Path }, cancellationToken);
+        return ok ? Results.Ok() : Results.NotFound();
+    }
+    catch (InvalidOperationException ex)
+    {
+        return Results.Problem(ex.Message, statusCode: StatusCodes.Status502BadGateway, title: "上游沙盒目录创建失败");
+    }
+}).RequireAuthorization();
+
+api.MapDelete("/containers/{containerId}/files", async (string containerId, string path, bool recursive, ClaimsPrincipal principal, OpenClawDbContext dbContext, OpenSandboxGateway gateway, CancellationToken cancellationToken) =>
+{
+    var user = await GetCurrentUserAsync(principal, dbContext, cancellationToken);
+    if (user == null)
+    {
+        return Results.Unauthorized();
+    }
+
+    var instance = await dbContext.DeploymentInstances.Include(x => x.SandboxServer).FirstOrDefaultAsync(x => x.ContainerId == containerId, cancellationToken);
+    if (instance == null || instance.SandboxServer == null || !CanAccess(user, instance) || string.IsNullOrWhiteSpace(instance.SandboxId))
+    {
+        return Results.NotFound();
+    }
+
+    try
+    {
+        var ok = await gateway.DeletePathAsync(instance.SandboxServer.BaseUrl, instance.SandboxServer.ApiToken, instance.SandboxId, path, recursive, cancellationToken);
+        return ok ? Results.NoContent() : Results.NotFound();
+    }
+    catch (InvalidOperationException ex)
+    {
+        return Results.Problem(ex.Message, statusCode: StatusCodes.Status502BadGateway, title: "上游沙盒路径删除失败");
+    }
 }).RequireAuthorization();
 
 app.Map("/api/deployments/{id:guid}/terminal/ws", async (Guid id, HttpContext httpContext, OpenClawDbContext dbContext, OpenSandboxGateway gateway, CancellationToken cancellationToken) =>
@@ -382,10 +714,14 @@ app.Map("/api/deployments/{id:guid}/terminal/ws", async (Guid id, HttpContext ht
         return Results.NotFound();
     }
 
-    using var socket = await httpContext.WebSockets.AcceptWebSocketAsync();
-    var uri = new Uri($"{instance.SandboxServer.BaseUrl.Replace("http://", "ws://").Replace("https://", "wss://")}/v1/sandboxes/{instance.SandboxId}/terminal/ws");
-    await gateway.BridgeWebSocketAsync(uri, instance.SandboxServer.ApiToken, socket, cancellationToken);
-    return Results.Empty;
+    return await BridgeSandboxWebSocketAsync(
+        httpContext,
+        gateway,
+        instance.SandboxServer.BaseUrl,
+        instance.SandboxId,
+        instance.SandboxServer.ApiToken,
+        "terminal",
+        cancellationToken);
 }).RequireAuthorization();
 
 app.Map("/api/deployments/{id:guid}/logs/ws", async (Guid id, HttpContext httpContext, OpenClawDbContext dbContext, OpenSandboxGateway gateway, CancellationToken cancellationToken) =>
@@ -407,10 +743,72 @@ app.Map("/api/deployments/{id:guid}/logs/ws", async (Guid id, HttpContext httpCo
         return Results.NotFound();
     }
 
-    using var socket = await httpContext.WebSockets.AcceptWebSocketAsync();
-    var uri = new Uri($"{instance.SandboxServer.BaseUrl.Replace("http://", "ws://").Replace("https://", "wss://")}/v1/sandboxes/{instance.SandboxId}/logs/ws");
-    await gateway.BridgeWebSocketAsync(uri, instance.SandboxServer.ApiToken, socket, cancellationToken);
-    return Results.Empty;
+    return await BridgeSandboxWebSocketAsync(
+        httpContext,
+        gateway,
+        instance.SandboxServer.BaseUrl,
+        instance.SandboxId,
+        instance.SandboxServer.ApiToken,
+        "logs",
+        cancellationToken);
+}).RequireAuthorization();
+
+app.Map("/api/containers/{containerId}/terminal/ws", async (string containerId, HttpContext httpContext, OpenClawDbContext dbContext, OpenSandboxGateway gateway, CancellationToken cancellationToken) =>
+{
+    if (!httpContext.WebSockets.IsWebSocketRequest)
+    {
+        return Results.BadRequest();
+    }
+
+    var user = await GetCurrentUserAsync(httpContext.User, dbContext, cancellationToken);
+    if (user == null)
+    {
+        return Results.Unauthorized();
+    }
+
+    var instance = await dbContext.DeploymentInstances.Include(x => x.SandboxServer).FirstOrDefaultAsync(x => x.ContainerId == containerId, cancellationToken);
+    if (instance == null || instance.SandboxServer == null || !CanAccess(user, instance) || string.IsNullOrWhiteSpace(instance.SandboxId))
+    {
+        return Results.NotFound();
+    }
+
+    return await BridgeSandboxWebSocketAsync(
+        httpContext,
+        gateway,
+        instance.SandboxServer.BaseUrl,
+        instance.SandboxId,
+        instance.SandboxServer.ApiToken,
+        "terminal",
+        cancellationToken);
+}).RequireAuthorization();
+
+app.Map("/api/containers/{containerId}/logs/ws", async (string containerId, HttpContext httpContext, OpenClawDbContext dbContext, OpenSandboxGateway gateway, CancellationToken cancellationToken) =>
+{
+    if (!httpContext.WebSockets.IsWebSocketRequest)
+    {
+        return Results.BadRequest();
+    }
+
+    var user = await GetCurrentUserAsync(httpContext.User, dbContext, cancellationToken);
+    if (user == null)
+    {
+        return Results.Unauthorized();
+    }
+
+    var instance = await dbContext.DeploymentInstances.Include(x => x.SandboxServer).FirstOrDefaultAsync(x => x.ContainerId == containerId, cancellationToken);
+    if (instance == null || instance.SandboxServer == null || !CanAccess(user, instance) || string.IsNullOrWhiteSpace(instance.SandboxId))
+    {
+        return Results.NotFound();
+    }
+
+    return await BridgeSandboxWebSocketAsync(
+        httpContext,
+        gateway,
+        instance.SandboxServer.BaseUrl,
+        instance.SandboxId,
+        instance.SandboxServer.ApiToken,
+        "logs",
+        cancellationToken);
 }).RequireAuthorization();
 
 if (Directory.Exists(webDistPath))
@@ -420,6 +818,43 @@ if (Directory.Exists(webDistPath))
 
 app.Run();
 return;
+
+static async Task<IResult> BridgeSandboxWebSocketAsync(HttpContext httpContext, OpenSandboxGateway gateway, string baseUrl, string sandboxId, string token, string streamType, CancellationToken cancellationToken)
+{
+    ClientWebSocket? upstream = null;
+    try
+    {
+        var uri = BuildSandboxWebSocketUri(baseUrl, sandboxId, streamType);
+        upstream = await gateway.ConnectWebSocketAsync(uri, token, cancellationToken);
+        using var clientSocket = await httpContext.WebSockets.AcceptWebSocketAsync();
+        await gateway.BridgeWebSocketAsync(upstream, clientSocket, cancellationToken);
+        return Results.Empty;
+    }
+    catch (WebSocketException ex) when (ex.Message.Contains("status code '404'", StringComparison.Ordinal))
+    {
+        upstream?.Dispose();
+        return Results.NotFound();
+    }
+    catch (WebSocketException ex)
+    {
+        upstream?.Dispose();
+        return Results.Problem(ex.Message, statusCode: StatusCodes.Status502BadGateway, title: "上游 WebSocket 握手失败");
+    }
+}
+
+static Uri BuildSandboxWebSocketUri(string baseUrl, string sandboxId, string streamType)
+{
+    var normalizedBaseUrl = baseUrl.Trim().TrimEnd('/');
+    var apiBaseUrl = normalizedBaseUrl.EndsWith("/v1", StringComparison.OrdinalIgnoreCase)
+        ? normalizedBaseUrl
+        : $"{normalizedBaseUrl}/v1";
+    var uri = new Uri($"{apiBaseUrl}/sandboxes/{Uri.EscapeDataString(sandboxId)}/{streamType}/ws");
+    var builder = new UriBuilder(uri)
+    {
+        Scheme = string.Equals(uri.Scheme, Uri.UriSchemeHttps, StringComparison.OrdinalIgnoreCase) ? Uri.UriSchemeWss : Uri.UriSchemeWs
+    };
+    return builder.Uri;
+}
 
 static async Task<AppUser?> GetCurrentUserAsync(ClaimsPrincipal principal, OpenClawDbContext dbContext, CancellationToken cancellationToken)
 {
@@ -435,4 +870,16 @@ static async Task<AppUser?> GetCurrentUserAsync(ClaimsPrincipal principal, OpenC
 static bool CanAccess(AppUser user, DeploymentInstance instance)
 {
     return user.Role == UserRole.Admin || instance.UserId == user.Id;
+}
+
+static string GetApplicationVersion()
+{
+    var assembly = typeof(PasswordService).Assembly;
+    var informationalVersion = assembly.GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion;
+    if (!string.IsNullOrWhiteSpace(informationalVersion))
+    {
+        return informationalVersion.Split('+')[0];
+    }
+
+    return assembly.GetName().Version?.ToString() ?? "dev";
 }

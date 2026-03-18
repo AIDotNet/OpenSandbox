@@ -12,6 +12,7 @@ public interface IOpenSandboxClient
     Task<SandboxUsage?> GetSandboxUsageAsync(string sandboxId, CancellationToken cancellationToken = default);
     Task<SandboxEndpoint?> GetSandboxEndpointAsync(string sandboxId, int port, bool useServerProxy = true, CancellationToken cancellationToken = default);
     Task<CommandExecutionResult?> ExecuteCommandAsync(string sandboxId, string command, CancellationToken cancellationToken = default);
+    Task<SandboxLogsResult?> GetSandboxLogsAsync(string sandboxId, int tail = 200, CancellationToken cancellationToken = default);
     Task<SandboxFileListResult?> ListFilesAsync(string sandboxId, string path, CancellationToken cancellationToken = default);
     Task<SandboxFileReadResult?> ReadFileAsync(string sandboxId, string path, CancellationToken cancellationToken = default);
     Task<bool> WriteFileAsync(string sandboxId, WriteSandboxFileRequest request, CancellationToken cancellationToken = default);
@@ -22,5 +23,7 @@ public interface IOpenSandboxClient
     Task<RenewSandboxExpirationResult?> RenewSandboxExpirationAsync(string sandboxId, DateTimeOffset expiresAt, CancellationToken cancellationToken = default);
     Task<bool> DeleteSandboxAsync(string sandboxId, CancellationToken cancellationToken = default);
     Uri BuildTerminalWebSocketUri(string sandboxId);
+    Uri BuildLogsWebSocketUri(string sandboxId);
     Task<ClientWebSocket> ConnectTerminalAsync(string sandboxId, CancellationToken cancellationToken = default);
+    Task<ClientWebSocket> ConnectLogsStreamAsync(string sandboxId, CancellationToken cancellationToken = default);
 }

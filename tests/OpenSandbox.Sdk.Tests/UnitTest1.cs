@@ -32,6 +32,7 @@ public sealed class OpenSandboxClientTests
         {
             Image = new SandboxImageReference { Uri = "ghcr.io/demo/image:latest" },
             Timeout = 600,
+            NeverExpires = true,
             Entrypoint = new List<string> { "bash" },
             ResourceLimits = new SandboxResourceLimits { Cpu = "500m", Memory = "512Mi" },
             Metadata = new Dictionary<string, string> { ["tenant"] = "demo" }
@@ -40,25 +41,31 @@ public sealed class OpenSandboxClientTests
         var usage = await client.GetSandboxUsageAsync("sb-1");
         var endpoint = await client.GetSandboxEndpointAsync("sb-1", 8080);
         var exec = await client.ExecuteCommandAsync("sb-1", "echo hi");
+        var logs = await client.GetSandboxLogsAsync("sb-1", 50);
         var paused = await client.PauseSandboxAsync("sb-1");
         var resumed = await client.ResumeSandboxAsync("sb-1");
         var renewed = await client.RenewSandboxExpirationAsync("sb-1", DateTimeOffset.UtcNow.AddMinutes(30));
         var deleted = await client.DeleteSandboxAsync("sb-1");
         var terminalUri = client.BuildTerminalWebSocketUri("sb-1");
+        var logsUri = client.BuildLogsWebSocketUri("sb-1");
 
         Assert.True(ping);
         Assert.Single(list.Items);
         Assert.Equal("sb-created", created.Id);
+        Assert.True(created.NeverExpires);
         Assert.Equal("sb-1", sandbox?.Id);
         Assert.Equal(12.5m, usage?.CpuPercent);
         Assert.Equal("https://demo.local/sb-1", endpoint?.Url);
         Assert.Equal(0, exec?.ExitCode);
+        Assert.Equal(2, logs?.Lines.Count);
         Assert.Equal("Paused", paused?.Status?.State);
         Assert.Equal("Running", resumed?.Status?.State);
         Assert.NotNull(renewed?.ExpiresAt);
         Assert.True(deleted);
         Assert.Equal("ws", terminalUri.Scheme);
+        Assert.Equal("ws", logsUri.Scheme);
         Assert.Contains("/v1/sandboxes/sb-1/terminal/ws", terminalUri.AbsoluteUri, StringComparison.Ordinal);
+        Assert.Contains("/v1/sandboxes/sb-1/logs/ws", logsUri.AbsoluteUri, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -89,7 +96,9 @@ public sealed class OpenSandboxClientTests
         });
 
         await Assert.ThrowsAsync<InvalidOperationException>(() => client.GetSandboxEndpointAsync("sb-1", 0));
+        await Assert.ThrowsAsync<InvalidOperationException>(() => client.GetSandboxLogsAsync("sb-1", 0));
         Assert.Throws<InvalidOperationException>(() => client.BuildTerminalWebSocketUri(string.Empty));
+        Assert.Throws<InvalidOperationException>(() => client.BuildLogsWebSocketUri(string.Empty));
     }
 
     [Fact]
@@ -174,7 +183,8 @@ public sealed class OpenSandboxClientTests
                 Id = "sb-created",
                 Status = new SandboxStatus { State = "Running" },
                 CreatedAt = DateTimeOffset.UtcNow,
-                ExpiresAt = DateTimeOffset.UtcNow.AddMinutes(10),
+                ExpiresAt = request?.NeverExpires == true ? null : DateTimeOffset.UtcNow.AddMinutes(10),
+                NeverExpires = request?.NeverExpires == true,
                 Metadata = request?.Metadata,
                 Entrypoint = request?.Entrypoint ?? new List<string>()
             });
@@ -200,6 +210,10 @@ public sealed class OpenSandboxClientTests
             Endpoint = $"demo.local:{port}",
             Url = $"https://demo.local/{id}",
             Headers = new Dictionary<string, string> { ["OPEN-SANDBOX-API-KEY"] = "test-key" }
+        }));
+        app.MapGet("/v1/sandboxes/{id}/logs", (string id) => Results.Ok(new SandboxLogsResult
+        {
+            Lines = new List<string> { "line-1", "line-2" }
         }));
         app.MapPost("/v1/sandboxes/{id}/exec", async (HttpContext context, string id) =>
         {

@@ -225,6 +225,8 @@ v1.MapPost("/sandboxes/{id}/pause", PauseAsync);
 v1.MapPost("/sandboxes/{id}:pause", PauseAsync);
 v1.MapPost("/sandboxes/{id}/resume", ResumeAsync);
 v1.MapPost("/sandboxes/{id}:resume", ResumeAsync);
+v1.MapPost("/sandboxes/{id}/restart", RestartAsync);
+v1.MapPost("/sandboxes/{id}:restart", RestartAsync);
 v1.MapPost("/sandboxes/{id}/renew", RenewAsync);
 v1.MapPost("/sandboxes/{id}:renew", RenewAsync);
 v1.MapPost("/sandboxes/{id}/renew-expiration", RenewAsync);
@@ -249,6 +251,12 @@ static async Task<IResult> PauseAsync(string id, OpenSandboxService sandboxServi
 static async Task<IResult> ResumeAsync(string id, OpenSandboxService sandboxService, CancellationToken cancellationToken)
 {
     var result = await sandboxService.ResumeAsync(id, cancellationToken);
+    return result == null ? Results.NotFound() : Results.Ok(result);
+}
+
+static async Task<IResult> RestartAsync(string id, OpenSandboxService sandboxService, CancellationToken cancellationToken)
+{
+    var result = await sandboxService.RestartAsync(id, cancellationToken);
     return result == null ? Results.NotFound() : Results.Ok(result);
 }
 

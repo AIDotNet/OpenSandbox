@@ -73,6 +73,94 @@ public sealed class OpenSandboxGateway(IHttpClientFactory httpClientFactory)
         return await response.Content.ReadFromJsonAsync<SandboxLogsResponse>(JsonOptions, cancellationToken);
     }
 
+    public async Task<ListFilesResponse?> ListFilesAsync(string baseUrl, string token, string sandboxId, string path, CancellationToken cancellationToken)
+    {
+        using var request = new HttpRequestMessage(HttpMethod.Get, Combine(baseUrl, $"/v1/sandboxes/{sandboxId}/files?path={Uri.EscapeDataString(string.IsNullOrWhiteSpace(path) ? "/" : path)}"));
+        request.Headers.Add("OPEN-SANDBOX-API-KEY", token);
+        using var client = httpClientFactory.CreateClient(nameof(OpenSandboxGateway));
+        using var response = await client.SendAsync(request, cancellationToken);
+        if (response.StatusCode == System.Net.HttpStatusCode.NotFound)
+        {
+            return null;
+        }
+
+        await EnsureSuccessAsync(response, $"List files for sandbox '{sandboxId}'", cancellationToken);
+        return await response.Content.ReadFromJsonAsync<ListFilesResponse>(JsonOptions, cancellationToken);
+    }
+
+    public async Task<ReadFileResponse?> ReadFileAsync(string baseUrl, string token, string sandboxId, string path, CancellationToken cancellationToken)
+    {
+        using var request = new HttpRequestMessage(HttpMethod.Get, Combine(baseUrl, $"/v1/sandboxes/{sandboxId}/files/content?path={Uri.EscapeDataString(path)}"));
+        request.Headers.Add("OPEN-SANDBOX-API-KEY", token);
+        using var client = httpClientFactory.CreateClient(nameof(OpenSandboxGateway));
+        using var response = await client.SendAsync(request, cancellationToken);
+        if (response.StatusCode == System.Net.HttpStatusCode.NotFound)
+        {
+            return null;
+        }
+
+        await EnsureSuccessAsync(response, $"Read file '{path}' for sandbox '{sandboxId}'", cancellationToken);
+        return await response.Content.ReadFromJsonAsync<ReadFileResponse>(JsonOptions, cancellationToken);
+    }
+
+    public async Task<bool> WriteFileAsync(string baseUrl, string token, string sandboxId, WriteFileRequest body, CancellationToken cancellationToken)
+    {
+        using var request = CreateJsonRequest(HttpMethod.Post, Combine(baseUrl, $"/v1/sandboxes/{sandboxId}/files/content"), token, body);
+        using var client = httpClientFactory.CreateClient(nameof(OpenSandboxGateway));
+        using var response = await client.SendAsync(request, cancellationToken);
+        if (response.StatusCode == System.Net.HttpStatusCode.NotFound)
+        {
+            return false;
+        }
+
+        await EnsureSuccessAsync(response, $"Write file '{body.Path}' for sandbox '{sandboxId}'", cancellationToken);
+        return true;
+    }
+
+    public async Task<bool> CreateDirectoryAsync(string baseUrl, string token, string sandboxId, CreateDirectoryRequest body, CancellationToken cancellationToken)
+    {
+        using var request = CreateJsonRequest(HttpMethod.Post, Combine(baseUrl, $"/v1/sandboxes/{sandboxId}/directories"), token, body);
+        using var client = httpClientFactory.CreateClient(nameof(OpenSandboxGateway));
+        using var response = await client.SendAsync(request, cancellationToken);
+        if (response.StatusCode == System.Net.HttpStatusCode.NotFound)
+        {
+            return false;
+        }
+
+        await EnsureSuccessAsync(response, $"Create directory '{body.Path}' for sandbox '{sandboxId}'", cancellationToken);
+        return true;
+    }
+
+    public async Task<bool> DeletePathAsync(string baseUrl, string token, string sandboxId, string path, bool recursive, CancellationToken cancellationToken)
+    {
+        using var request = new HttpRequestMessage(HttpMethod.Delete, Combine(baseUrl, $"/v1/sandboxes/{sandboxId}/files?path={Uri.EscapeDataString(path)}&recursive={recursive.ToString().ToLowerInvariant()}"));
+        request.Headers.Add("OPEN-SANDBOX-API-KEY", token);
+        using var client = httpClientFactory.CreateClient(nameof(OpenSandboxGateway));
+        using var response = await client.SendAsync(request, cancellationToken);
+        if (response.StatusCode == System.Net.HttpStatusCode.NotFound)
+        {
+            return false;
+        }
+
+        await EnsureSuccessAsync(response, $"Delete path '{path}' for sandbox '{sandboxId}'", cancellationToken);
+        return true;
+    }
+
+    public async Task<SandboxInfoResponse?> RestartSandboxAsync(string baseUrl, string token, string sandboxId, CancellationToken cancellationToken)
+    {
+        using var request = new HttpRequestMessage(HttpMethod.Post, Combine(baseUrl, $"/v1/sandboxes/{sandboxId}/restart"));
+        request.Headers.Add("OPEN-SANDBOX-API-KEY", token);
+        using var client = httpClientFactory.CreateClient(nameof(OpenSandboxGateway));
+        using var response = await client.SendAsync(request, cancellationToken);
+        if (response.StatusCode == System.Net.HttpStatusCode.NotFound)
+        {
+            return null;
+        }
+
+        response.EnsureSuccessStatusCode();
+        return await response.Content.ReadFromJsonAsync<SandboxInfoResponse>(JsonOptions, cancellationToken);
+    }
+
     public async Task DeleteSandboxAsync(string baseUrl, string token, string sandboxId, CancellationToken cancellationToken)
     {
         using var request = new HttpRequestMessage(HttpMethod.Delete, Combine(baseUrl, $"/v1/sandboxes/{sandboxId}"));
@@ -85,12 +173,25 @@ public sealed class OpenSandboxGateway(IHttpClientFactory httpClientFactory)
         }
     }
 
-    public async Task BridgeWebSocketAsync(Uri remoteUri, string token, WebSocket clientSocket, CancellationToken cancellationToken)
+    public async Task<ClientWebSocket> ConnectWebSocketAsync(Uri remoteUri, string token, CancellationToken cancellationToken)
     {
-        using var upstream = new ClientWebSocket();
+        var upstream = new ClientWebSocket();
         upstream.Options.SetRequestHeader("OPEN-SANDBOX-API-KEY", token);
-        await upstream.ConnectAsync(remoteUri, cancellationToken);
 
+        try
+        {
+            await upstream.ConnectAsync(remoteUri, cancellationToken);
+            return upstream;
+        }
+        catch
+        {
+            upstream.Dispose();
+            throw;
+        }
+    }
+
+    public async Task BridgeWebSocketAsync(WebSocket upstream, WebSocket clientSocket, CancellationToken cancellationToken)
+    {
         var forward = PumpAsync(clientSocket, upstream, cancellationToken);
         var backward = PumpAsync(upstream, clientSocket, cancellationToken);
         await Task.WhenAny(forward, backward);
@@ -134,6 +235,18 @@ public sealed class OpenSandboxGateway(IHttpClientFactory httpClientFactory)
         request.Headers.Add("OPEN-SANDBOX-API-KEY", token);
         request.Content = new StringContent(JsonSerializer.Serialize(body), Encoding.UTF8, "application/json");
         return request;
+    }
+
+    private static async Task EnsureSuccessAsync(HttpResponseMessage response, string action, CancellationToken cancellationToken)
+    {
+        if (response.IsSuccessStatusCode)
+        {
+            return;
+        }
+
+        var body = response.Content == null ? string.Empty : await response.Content.ReadAsStringAsync(cancellationToken);
+        var detail = string.IsNullOrWhiteSpace(body) ? response.ReasonPhrase ?? "Unknown error" : body;
+        throw new InvalidOperationException($"{action} failed: {(int)response.StatusCode} {detail}");
     }
 
     private static string Combine(string baseUrl, string path) => $"{baseUrl.TrimEnd('/')}{path}";
