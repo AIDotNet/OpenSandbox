@@ -47,7 +47,7 @@ public sealed class SystemSettings
 {
     public int Id { get; set; } = 1;
     public string DefaultCpu { get; set; } = "1000m";
-    public string DefaultMemory { get; set; } = "1Gi";
+    public string DefaultMemory { get; set; } = "2Gi";
     public int DefaultLogTailLines { get; set; } = 200;
 }
 

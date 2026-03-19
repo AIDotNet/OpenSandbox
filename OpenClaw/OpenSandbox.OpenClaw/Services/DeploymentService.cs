@@ -32,13 +32,12 @@ public sealed class DeploymentService(
 
         var configFileName = NormalizeFileName(templateVersion.ConfigFileName, "openclaw.json");
         var configPath = BuildChildPath(root, configFileName);
-        var config = new
-        {
-            apiEndpoint = request.ApiEndpoint.Trim(),
+        var config = BuildOpenClawConfig(
+            request.ApiEndpoint,
             apiType,
-            model = request.Model.Trim(),
-            apiKey = request.ApiKey
-        };
+            request.Model,
+            request.ApiKey,
+            templateVersion.WorkspaceMountPath);
         await File.WriteAllTextAsync(configPath, JsonSerializer.Serialize(config, JsonOptions), Encoding.UTF8, cancellationToken);
 
         var existing = await dbContext.DeploymentInstances.FirstOrDefaultAsync(x => x.UserId == userId && x.SandboxServerId == server.Id, cancellationToken);
@@ -257,9 +256,66 @@ public sealed class DeploymentService(
         };
     }
 
+    private static object BuildOpenClawConfig(string apiEndpoint, string apiType, string model, string apiKey, string workspaceMountPath)
+    {
+        var normalizedModel = string.IsNullOrWhiteSpace(model) ? "custom-model" : model.Trim();
+        var providerId = "custom";
+        var modelRef = $"{providerId}/{normalizedModel}";
+
+        return new
+        {
+            agents = new
+            {
+                defaults = new
+                {
+                    workspace = NormalizeMountPath(workspaceMountPath),
+                    model = new
+                    {
+                        primary = modelRef
+                    },
+                    models = new Dictionary<string, object>
+                    {
+                        [modelRef] = new
+                        {
+                            alias = normalizedModel
+                        }
+                    }
+                }
+            },
+            models = new
+            {
+                mode = "merge",
+                providers = new Dictionary<string, object>
+                {
+                    [providerId] = new
+                    {
+                        baseUrl = apiEndpoint.Trim(),
+                        apiKey,
+                        api = MapProviderApi(apiType),
+                        models = new[]
+                        {
+                            new
+                            {
+                                id = normalizedModel,
+                                name = normalizedModel
+                            }
+                        }
+                    }
+                }
+            }
+        };
+    }
+
     private static string NormalizeApiType(string value)
     {
         return string.Equals(value?.Trim(), "messages", StringComparison.OrdinalIgnoreCase) ? "messages" : "chat";
+    }
+
+    private static string MapProviderApi(string apiType)
+    {
+        return string.Equals(apiType, "messages", StringComparison.OrdinalIgnoreCase)
+            ? "anthropic-messages"
+            : "openai-completions";
     }
 
     private static string BuildPersistentDirectory(string rootPath, string userName)
