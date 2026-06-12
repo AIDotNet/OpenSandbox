@@ -1,6 +1,7 @@
 using System.Net.WebSockets;
 using System.Reflection;
 using System.Security.Claims;
+using System.Text.Json;
 using Microsoft.AspNetCore.Authentication;
 using Microsoft.AspNetCore.Authentication.Cookies;
 using Microsoft.AspNetCore.Authorization;
@@ -43,6 +44,7 @@ builder.Services.AddScoped<SecretProtector>();
 builder.Services.AddScoped<OpenSandboxGateway>();
 builder.Services.AddScoped<DeploymentService>();
 builder.Services.AddScoped<AdminBootstrapper>();
+builder.Services.AddSingleton<TerminalAccessTicketService>();
 builder.Services.AddHostedService<SandboxServerHealthBackgroundService>();
 builder.Services.AddAuthentication(CookieAuthenticationDefaults.AuthenticationScheme)
     .AddCookie(options =>
@@ -584,9 +586,15 @@ api.MapGet("/containers/{containerId}/files", async (string containerId, string?
         return Results.NotFound();
     }
 
+    var workspaceRoot = GetWorkspaceRootPath(instance);
+    if (!TryResolveScopedContainerPath(path, workspaceRoot, out var scopedPath))
+    {
+        return Results.BadRequest(new { message = $"路径超出工作区范围：{workspaceRoot}" });
+    }
+
     try
     {
-        var result = await gateway.ListFilesAsync(instance.SandboxServer.BaseUrl, instance.SandboxServer.ApiToken, instance.SandboxId, path ?? "/", cancellationToken);
+        var result = await gateway.ListFilesAsync(instance.SandboxServer.BaseUrl, instance.SandboxServer.ApiToken, instance.SandboxId, scopedPath, cancellationToken);
         return result == null ? Results.NotFound() : Results.Ok(result);
     }
     catch (InvalidOperationException ex)
@@ -609,9 +617,15 @@ api.MapGet("/containers/{containerId}/files/content", async (string containerId,
         return Results.NotFound();
     }
 
+    var workspaceRoot = GetWorkspaceRootPath(instance);
+    if (!TryResolveScopedContainerPath(path, workspaceRoot, out var scopedPath))
+    {
+        return Results.BadRequest(new { message = $"路径超出工作区范围：{workspaceRoot}" });
+    }
+
     try
     {
-        var result = await gateway.ReadFileAsync(instance.SandboxServer.BaseUrl, instance.SandboxServer.ApiToken, instance.SandboxId, path, cancellationToken);
+        var result = await gateway.ReadFileAsync(instance.SandboxServer.BaseUrl, instance.SandboxServer.ApiToken, instance.SandboxId, scopedPath, cancellationToken);
         return result == null ? Results.NotFound() : Results.Ok(result);
     }
     catch (InvalidOperationException ex)
@@ -634,9 +648,15 @@ api.MapPost("/containers/{containerId}/files/content", async (string containerId
         return Results.NotFound();
     }
 
+    var workspaceRoot = GetWorkspaceRootPath(instance);
+    if (!TryResolveScopedContainerPath(request.Path, workspaceRoot, out var scopedPath))
+    {
+        return Results.BadRequest(new { message = $"路径超出工作区范围：{workspaceRoot}" });
+    }
+
     try
     {
-        var ok = await gateway.WriteFileAsync(instance.SandboxServer.BaseUrl, instance.SandboxServer.ApiToken, instance.SandboxId, new WriteFileRequest { Path = request.Path, ContentBase64 = request.ContentBase64 }, cancellationToken);
+        var ok = await gateway.WriteFileAsync(instance.SandboxServer.BaseUrl, instance.SandboxServer.ApiToken, instance.SandboxId, new WriteFileRequest { Path = scopedPath, ContentBase64 = request.ContentBase64 }, cancellationToken);
         return ok ? Results.Ok() : Results.NotFound();
     }
     catch (InvalidOperationException ex)
@@ -659,14 +679,84 @@ api.MapPost("/containers/{containerId}/directories", async (string containerId, 
         return Results.NotFound();
     }
 
+    var workspaceRoot = GetWorkspaceRootPath(instance);
+    if (!TryResolveScopedContainerPath(request.Path, workspaceRoot, out var scopedPath))
+    {
+        return Results.BadRequest(new { message = $"路径超出工作区范围：{workspaceRoot}" });
+    }
+
     try
     {
-        var ok = await gateway.CreateDirectoryAsync(instance.SandboxServer.BaseUrl, instance.SandboxServer.ApiToken, instance.SandboxId, new CreateDirectoryRequest { Path = request.Path }, cancellationToken);
+        var ok = await gateway.CreateDirectoryAsync(instance.SandboxServer.BaseUrl, instance.SandboxServer.ApiToken, instance.SandboxId, new CreateDirectoryRequest { Path = scopedPath }, cancellationToken);
         return ok ? Results.Ok() : Results.NotFound();
     }
     catch (InvalidOperationException ex)
     {
         return Results.Problem(ex.Message, statusCode: StatusCodes.Status502BadGateway, title: "上游沙盒目录创建失败");
+    }
+}).RequireAuthorization();
+
+api.MapPost("/containers/{containerId}/files/move", async (string containerId, DeploymentMovePathRequest request, ClaimsPrincipal principal, OpenClawDbContext dbContext, OpenSandboxGateway gateway, CancellationToken cancellationToken) =>
+{
+    var user = await GetCurrentUserAsync(principal, dbContext, cancellationToken);
+    if (user == null)
+    {
+        return Results.Unauthorized();
+    }
+
+    var instance = await dbContext.DeploymentInstances.Include(x => x.SandboxServer).FirstOrDefaultAsync(x => x.ContainerId == containerId, cancellationToken);
+    if (instance == null || instance.SandboxServer == null || !CanAccess(user, instance) || string.IsNullOrWhiteSpace(instance.SandboxId))
+    {
+        return Results.NotFound();
+    }
+
+    var workspaceRoot = GetWorkspaceRootPath(instance);
+    if (!TryResolveScopedContainerPath(request.SourcePath, workspaceRoot, out var scopedSourcePath)
+        || !TryResolveScopedContainerPath(request.DestinationPath, workspaceRoot, out var scopedDestinationPath))
+    {
+        return Results.BadRequest(new { message = $"路径超出工作区范围：{workspaceRoot}" });
+    }
+
+    try
+    {
+        var ok = await gateway.MovePathAsync(instance.SandboxServer.BaseUrl, instance.SandboxServer.ApiToken, instance.SandboxId, new MovePathRequest { SourcePath = scopedSourcePath, DestinationPath = scopedDestinationPath }, cancellationToken);
+        return ok ? Results.Ok() : Results.NotFound();
+    }
+    catch (InvalidOperationException ex)
+    {
+        return Results.Problem(ex.Message, statusCode: StatusCodes.Status502BadGateway, title: "上游沙盒路径移动失败");
+    }
+}).RequireAuthorization();
+
+api.MapPost("/containers/{containerId}/files/copy", async (string containerId, DeploymentCopyPathRequest request, ClaimsPrincipal principal, OpenClawDbContext dbContext, OpenSandboxGateway gateway, CancellationToken cancellationToken) =>
+{
+    var user = await GetCurrentUserAsync(principal, dbContext, cancellationToken);
+    if (user == null)
+    {
+        return Results.Unauthorized();
+    }
+
+    var instance = await dbContext.DeploymentInstances.Include(x => x.SandboxServer).FirstOrDefaultAsync(x => x.ContainerId == containerId, cancellationToken);
+    if (instance == null || instance.SandboxServer == null || !CanAccess(user, instance) || string.IsNullOrWhiteSpace(instance.SandboxId))
+    {
+        return Results.NotFound();
+    }
+
+    var workspaceRoot = GetWorkspaceRootPath(instance);
+    if (!TryResolveScopedContainerPath(request.SourcePath, workspaceRoot, out var scopedSourcePath)
+        || !TryResolveScopedContainerPath(request.DestinationPath, workspaceRoot, out var scopedDestinationPath))
+    {
+        return Results.BadRequest(new { message = $"路径超出工作区范围：{workspaceRoot}" });
+    }
+
+    try
+    {
+        var ok = await gateway.CopyPathAsync(instance.SandboxServer.BaseUrl, instance.SandboxServer.ApiToken, instance.SandboxId, new CopyPathRequest { SourcePath = scopedSourcePath, DestinationPath = scopedDestinationPath }, cancellationToken);
+        return ok ? Results.Ok() : Results.NotFound();
+    }
+    catch (InvalidOperationException ex)
+    {
+        return Results.Problem(ex.Message, statusCode: StatusCodes.Status502BadGateway, title: "上游沙盒路径复制失败");
     }
 }).RequireAuthorization();
 
@@ -684,9 +774,15 @@ api.MapDelete("/containers/{containerId}/files", async (string containerId, stri
         return Results.NotFound();
     }
 
+    var workspaceRoot = GetWorkspaceRootPath(instance);
+    if (!TryResolveScopedContainerPath(path, workspaceRoot, out var scopedPath))
+    {
+        return Results.BadRequest(new { message = $"路径超出工作区范围：{workspaceRoot}" });
+    }
+
     try
     {
-        var ok = await gateway.DeletePathAsync(instance.SandboxServer.BaseUrl, instance.SandboxServer.ApiToken, instance.SandboxId, path, recursive, cancellationToken);
+        var ok = await gateway.DeletePathAsync(instance.SandboxServer.BaseUrl, instance.SandboxServer.ApiToken, instance.SandboxId, scopedPath, recursive, cancellationToken);
         return ok ? Results.NoContent() : Results.NotFound();
     }
     catch (InvalidOperationException ex)
@@ -752,6 +848,63 @@ app.Map("/api/deployments/{id:guid}/logs/ws", async (Guid id, HttpContext httpCo
         "logs",
         cancellationToken);
 }).RequireAuthorization();
+
+api.MapPost("/containers/{containerId}/terminal/access-link", async (string containerId, HttpContext httpContext, ClaimsPrincipal principal, OpenClawDbContext dbContext, TerminalAccessTicketService ticketService, CancellationToken cancellationToken) =>
+{
+    var user = await GetCurrentUserAsync(principal, dbContext, cancellationToken);
+    if (user == null)
+    {
+        return Results.Unauthorized();
+    }
+
+    var instance = await dbContext.DeploymentInstances.Include(x => x.SandboxServer).FirstOrDefaultAsync(x => x.ContainerId == containerId, cancellationToken);
+    if (instance == null || instance.SandboxServer == null || !CanAccess(user, instance) || string.IsNullOrWhiteSpace(instance.SandboxId))
+    {
+        return Results.NotFound();
+    }
+
+    var scheme = GetExternalScheme(httpContext);
+    var wsScheme = string.Equals(scheme, Uri.UriSchemeHttps, StringComparison.OrdinalIgnoreCase)
+        ? Uri.UriSchemeWss
+        : Uri.UriSchemeWs;
+    var ticket = ticketService.Issue(user.Id, containerId, TimeSpan.FromMinutes(2));
+    var baseUrl = $"{wsScheme}://{httpContext.Request.Host}{httpContext.Request.PathBase}";
+    return Results.Ok(new { url = $"{baseUrl}/api/terminal/{ticket}/ws" });
+}).RequireAuthorization();
+
+app.Map("/api/terminal/{ticket}/ws", async (string ticket, HttpContext httpContext, OpenClawDbContext dbContext, TerminalAccessTicketService ticketService, OpenSandboxGateway gateway, CancellationToken cancellationToken) =>
+{
+    if (!httpContext.WebSockets.IsWebSocketRequest)
+    {
+        return Results.BadRequest();
+    }
+
+    if (!ticketService.TryConsume(ticket, out var payload))
+    {
+        return Results.Unauthorized();
+    }
+
+    var user = await dbContext.Users.FirstOrDefaultAsync(x => x.Id == payload.UserId && x.Status == UserStatus.Active, cancellationToken);
+    if (user == null)
+    {
+        return Results.Unauthorized();
+    }
+
+    var instance = await dbContext.DeploymentInstances.Include(x => x.SandboxServer).FirstOrDefaultAsync(x => x.ContainerId == payload.ContainerId, cancellationToken);
+    if (instance == null || instance.SandboxServer == null || !CanAccess(user, instance) || string.IsNullOrWhiteSpace(instance.SandboxId))
+    {
+        return Results.NotFound();
+    }
+
+    return await BridgeSandboxWebSocketAsync(
+        httpContext,
+        gateway,
+        instance.SandboxServer.BaseUrl,
+        instance.SandboxId,
+        instance.SandboxServer.ApiToken,
+        "terminal",
+        cancellationToken);
+});
 
 app.Map("/api/containers/{containerId}/terminal/ws", async (string containerId, HttpContext httpContext, OpenClawDbContext dbContext, OpenSandboxGateway gateway, CancellationToken cancellationToken) =>
 {
@@ -854,6 +1007,116 @@ static Uri BuildSandboxWebSocketUri(string baseUrl, string sandboxId, string str
         Scheme = string.Equals(uri.Scheme, Uri.UriSchemeHttps, StringComparison.OrdinalIgnoreCase) ? Uri.UriSchemeWss : Uri.UriSchemeWs
     };
     return builder.Uri;
+}
+
+static string GetExternalScheme(HttpContext httpContext)
+{
+    if (httpContext.Request.Headers.TryGetValue("X-Forwarded-Proto", out var values))
+    {
+        var forwarded = values.ToString().Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).FirstOrDefault();
+        if (!string.IsNullOrWhiteSpace(forwarded))
+        {
+            return forwarded;
+        }
+    }
+
+    return httpContext.Request.Scheme;
+}
+
+static string GetWorkspaceRootPath(DeploymentInstance instance)
+{
+    if (!string.IsNullOrWhiteSpace(instance.TemplateSnapshotJson))
+    {
+        try
+        {
+            using var document = JsonDocument.Parse(instance.TemplateSnapshotJson);
+            if (document.RootElement.ValueKind == JsonValueKind.Object
+                && document.RootElement.TryGetProperty("workspaceMountPath", out var workspacePath)
+                && workspacePath.ValueKind == JsonValueKind.String)
+            {
+                return NormalizeUnixPath(workspacePath.GetString());
+            }
+        }
+        catch (JsonException)
+        {
+        }
+    }
+
+    return "/";
+}
+
+static bool TryResolveScopedContainerPath(string? requestedPath, string workspaceRoot, out string scopedPath)
+{
+    workspaceRoot = NormalizeUnixPath(workspaceRoot);
+
+    if (string.IsNullOrWhiteSpace(requestedPath))
+    {
+        scopedPath = workspaceRoot;
+        return true;
+    }
+
+    var trimmedPath = requestedPath.Trim();
+    if (!trimmedPath.StartsWith('/'))
+    {
+        trimmedPath = CombineUnixPath(workspaceRoot, trimmedPath);
+    }
+
+    scopedPath = NormalizeUnixPath(trimmedPath);
+    if (workspaceRoot == "/")
+    {
+        return true;
+    }
+
+    return string.Equals(scopedPath, workspaceRoot, StringComparison.Ordinal)
+        || scopedPath.StartsWith(workspaceRoot + "/", StringComparison.Ordinal);
+}
+
+static string CombineUnixPath(string basePath, string relativePath)
+{
+    var normalizedBase = NormalizeUnixPath(basePath);
+    var normalizedRelative = (relativePath ?? string.Empty).Replace('\\', '/').Trim('/');
+    if (string.IsNullOrWhiteSpace(normalizedRelative))
+    {
+        return normalizedBase;
+    }
+
+    return normalizedBase == "/"
+        ? $"/{normalizedRelative}"
+        : $"{normalizedBase}/{normalizedRelative}";
+}
+
+static string NormalizeUnixPath(string? path)
+{
+    if (string.IsNullOrWhiteSpace(path))
+    {
+        return "/";
+    }
+
+    var segments = path.Replace('\\', '/')
+        .Split('/', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+    var stack = new Stack<string>();
+
+    foreach (var segment in segments)
+    {
+        if (segment == ".")
+        {
+            continue;
+        }
+
+        if (segment == "..")
+        {
+            if (stack.Count > 0)
+            {
+                stack.Pop();
+            }
+
+            continue;
+        }
+
+        stack.Push(segment);
+    }
+
+    return stack.Count == 0 ? "/" : "/" + string.Join('/', stack.Reverse());
 }
 
 static async Task<AppUser?> GetCurrentUserAsync(ClaimsPrincipal principal, OpenClawDbContext dbContext, CancellationToken cancellationToken)

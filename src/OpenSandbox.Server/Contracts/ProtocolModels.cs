@@ -184,6 +184,18 @@ public sealed class CreateDirectoryRequest
     public string Path { get; set; } = string.Empty;
 }
 
+public sealed class MovePathRequest
+{
+    public string SourcePath { get; set; } = string.Empty;
+    public string DestinationPath { get; set; } = string.Empty;
+}
+
+public sealed class CopyPathRequest
+{
+    public string SourcePath { get; set; } = string.Empty;
+    public string DestinationPath { get; set; } = string.Empty;
+}
+
 public sealed class SandboxLogsResponse
 {
     public List<string> Lines { get; set; } = new();

@@ -18,6 +18,8 @@ public interface ISandboxRuntime
     Task<SandboxFileReadResult?> ReadFileAsync(string containerName, string path, CancellationToken cancellationToken);
     Task WriteFileAsync(string containerName, string path, byte[] content, CancellationToken cancellationToken);
     Task CreateDirectoryAsync(string containerName, string path, CancellationToken cancellationToken);
+    Task MovePathAsync(string containerName, string sourcePath, string destinationPath, CancellationToken cancellationToken);
+    Task CopyPathAsync(string containerName, string sourcePath, string destinationPath, CancellationToken cancellationToken);
     Task DeletePathAsync(string containerName, string path, bool recursive, CancellationToken cancellationToken);
     Task RunTerminalSessionAsync(string containerName, WebSocket webSocket, CancellationToken cancellationToken);
     Task<IReadOnlyList<string>?> GetLogsAsync(string containerName, int tail, CancellationToken cancellationToken);

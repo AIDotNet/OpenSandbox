@@ -92,8 +92,8 @@ export default function ContainerWorkspace() {
 
       {tab === "overview" ? <ContainerOverviewPanel detail={containerDetail} /> : null}
       {tab === "logs" ? <ContainerLogsPanel containerId={containerId} /> : null}
-      {tab === "terminal" ? <ContainerTerminalPanel containerId={containerId} /> : null}
-      {tab === "files" ? <ContainerFilesPanel containerId={containerId} /> : null}
+      {tab === "terminal" ? <ContainerTerminalPanel key={containerId} containerId={containerId} /> : null}
+      {tab === "files" ? <ContainerFilesPanel key={containerId} containerId={containerId} workspacePath={getWorkspacePath(containerDetail.templateSnapshot)} /> : null}
 
       <Card title="模板快照" description="保留实例部署时的模板快照，便于核对运行配置。">
         {containerDetail.templateSnapshot ? (
@@ -108,4 +108,13 @@ export default function ContainerWorkspace() {
 
 function normalizeTab(value: string): ContainerTab {
   return ["overview", "logs", "terminal", "files"].includes(value) ? (value as ContainerTab) : "overview"
+}
+
+function getWorkspacePath(templateSnapshot: unknown) {
+  if (!templateSnapshot || typeof templateSnapshot !== "object") {
+    return "/"
+  }
+
+  const candidate = (templateSnapshot as Record<string, unknown>).workspaceMountPath
+  return typeof candidate === "string" && candidate.trim() ? candidate : "/"
 }

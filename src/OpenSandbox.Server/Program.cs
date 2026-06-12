@@ -161,8 +161,16 @@ v1.MapPost("/sandboxes/{id}/exec", async (string id, ExecuteCommandRequest reque
 v1.MapGet("/sandboxes/{id}/files", async (string id, HttpContext httpContext, OpenSandboxService sandboxService, CancellationToken cancellationToken) =>
 {
     var path = httpContext.Request.Query["path"].ToString();
-    var result = await sandboxService.ListFilesAsync(id, path, cancellationToken);
-    return result == null ? Results.NotFound() : Results.Ok(result);
+
+    try
+    {
+        var result = await sandboxService.ListFilesAsync(id, path, cancellationToken);
+        return result == null ? Results.NotFound() : Results.Ok(result);
+    }
+    catch (DirectoryNotFoundException ex)
+    {
+        return Results.NotFound(new { error = new { code = "DirectoryNotFound", message = ex.Message } });
+    }
 });
 
 v1.MapGet("/sandboxes/{id}/files/content", async (string id, HttpContext httpContext, OpenSandboxService sandboxService, CancellationToken cancellationToken) =>
@@ -196,6 +204,28 @@ v1.MapPost("/sandboxes/{id}/directories", async (string id, CreateDirectoryReque
     }
 
     var ok = await sandboxService.CreateDirectoryAsync(id, request, cancellationToken);
+    return ok ? Results.Ok(new { success = true }) : Results.NotFound();
+});
+
+v1.MapPost("/sandboxes/{id}/files/move", async (string id, MovePathRequest request, OpenSandboxService sandboxService, CancellationToken cancellationToken) =>
+{
+    if (string.IsNullOrWhiteSpace(request.SourcePath) || string.IsNullOrWhiteSpace(request.DestinationPath))
+    {
+        return Results.BadRequest(new { error = new { code = "InvalidArgument", message = "sourcePath and destinationPath are required." } });
+    }
+
+    var ok = await sandboxService.MovePathAsync(id, request, cancellationToken);
+    return ok ? Results.Ok(new { success = true }) : Results.NotFound();
+});
+
+v1.MapPost("/sandboxes/{id}/files/copy", async (string id, CopyPathRequest request, OpenSandboxService sandboxService, CancellationToken cancellationToken) =>
+{
+    if (string.IsNullOrWhiteSpace(request.SourcePath) || string.IsNullOrWhiteSpace(request.DestinationPath))
+    {
+        return Results.BadRequest(new { error = new { code = "InvalidArgument", message = "sourcePath and destinationPath are required." } });
+    }
+
+    var ok = await sandboxService.CopyPathAsync(id, request, cancellationToken);
     return ok ? Results.Ok(new { success = true }) : Results.NotFound();
 });
 

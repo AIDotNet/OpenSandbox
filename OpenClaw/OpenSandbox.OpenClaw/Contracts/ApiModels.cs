@@ -12,3 +12,5 @@ public sealed record TemplateVersionRequest(string Version, string Image, int Co
 public sealed record DeployRequest(Guid SandboxServerId, Guid TemplateId, string ApiEndpoint, string ApiType, string Model, string ApiKey);
 public sealed record DeploymentWriteFileRequest(string Path, string ContentBase64);
 public sealed record DeploymentCreateDirectoryRequest(string Path);
+public sealed record DeploymentMovePathRequest(string SourcePath, string DestinationPath);
+public sealed record DeploymentCopyPathRequest(string SourcePath, string DestinationPath);

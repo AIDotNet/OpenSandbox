@@ -268,9 +268,14 @@ public sealed class DockerSandboxRuntime : ISandboxRuntime
         var result = await ExecuteProcessAsync(["exec", containerName, "sh", "-lc", command], cancellationToken, throwOnError: false);
         if (result.ExitCode != 0)
         {
-            if (ContainsNoSuchContainer(result.StdErr) || result.ExitCode == 2)
+            if (ContainsNoSuchContainer(result.StdErr))
             {
                 return [];
+            }
+
+            if (result.ExitCode == 2 || ContainsNoSuchPath(result.StdErr))
+            {
+                throw new DirectoryNotFoundException($"Directory not found: {normalizedPath}");
             }
 
             throw new InvalidOperationException($"Failed to list files: {result.StdErr}");
@@ -377,6 +382,32 @@ public sealed class DockerSandboxRuntime : ISandboxRuntime
         await ExecuteProcessAsync(["exec", containerName, "sh", "-lc", $"mkdir -p {EscapeShellArgument(normalizedPath)}"], cancellationToken, throwOnError: true);
     }
 
+    public async Task MovePathAsync(string containerName, string sourcePath, string destinationPath, CancellationToken cancellationToken)
+    {
+        var normalizedSourcePath = NormalizeContainerPath(sourcePath);
+        var normalizedDestinationPath = NormalizeContainerPath(destinationPath);
+        var destinationDirectory = NormalizeContainerPath(Path.GetDirectoryName(normalizedDestinationPath.Replace('/', Path.DirectorySeparatorChar))?.Replace(Path.DirectorySeparatorChar, '/') ?? "/");
+        var command = $"mkdir -p {EscapeShellArgument(destinationDirectory)} && mv {EscapeShellArgument(normalizedSourcePath)} {EscapeShellArgument(normalizedDestinationPath)}";
+        var result = await ExecuteProcessAsync(["exec", containerName, "sh", "-lc", command], cancellationToken, throwOnError: false);
+        if (result.ExitCode != 0 && !ContainsNoSuchContainer(result.StdErr))
+        {
+            throw new InvalidOperationException($"Failed to move path: {result.StdErr}");
+        }
+    }
+
+    public async Task CopyPathAsync(string containerName, string sourcePath, string destinationPath, CancellationToken cancellationToken)
+    {
+        var normalizedSourcePath = NormalizeContainerPath(sourcePath);
+        var normalizedDestinationPath = NormalizeContainerPath(destinationPath);
+        var destinationDirectory = NormalizeContainerPath(Path.GetDirectoryName(normalizedDestinationPath.Replace('/', Path.DirectorySeparatorChar))?.Replace(Path.DirectorySeparatorChar, '/') ?? "/");
+        var command = $"mkdir -p {EscapeShellArgument(destinationDirectory)} && if [ -d {EscapeShellArgument(normalizedSourcePath)} ]; then cp -R {EscapeShellArgument(normalizedSourcePath)} {EscapeShellArgument(normalizedDestinationPath)}; else cp {EscapeShellArgument(normalizedSourcePath)} {EscapeShellArgument(normalizedDestinationPath)}; fi";
+        var result = await ExecuteProcessAsync(["exec", containerName, "sh", "-lc", command], cancellationToken, throwOnError: false);
+        if (result.ExitCode != 0 && !ContainsNoSuchContainer(result.StdErr))
+        {
+            throw new InvalidOperationException($"Failed to copy path: {result.StdErr}");
+        }
+    }
+
     public async Task DeletePathAsync(string containerName, string path, bool recursive, CancellationToken cancellationToken)
     {
         var normalizedPath = NormalizeContainerPath(path);
@@ -390,12 +421,18 @@ public sealed class DockerSandboxRuntime : ISandboxRuntime
 
     public async Task RunTerminalSessionAsync(string containerName, WebSocket webSocket, CancellationToken cancellationToken)
     {
+        if (OperatingSystem.IsWindows())
+        {
+            await RunWindowsTerminalSessionAsync(containerName, webSocket, cancellationToken);
+            return;
+        }
+
         using var process = StartInteractiveProcess(["exec", "-i", containerName, "sh", "-lc", "export TERM=xterm-256color; if command -v bash >/dev/null 2>&1; then exec bash -i; else exec sh -i; fi"]);
 
         using var sendLock = new SemaphoreSlim(1, 1);
         var stdoutTask = PumpStreamToWebSocketAsync(process.StandardOutput.BaseStream, webSocket, sendLock, cancellationToken);
         var stderrTask = PumpStreamToWebSocketAsync(process.StandardError.BaseStream, webSocket, sendLock, cancellationToken);
-        var stdinTask = PumpWebSocketToStreamAsync(webSocket, process.StandardInput, cancellationToken);
+        var stdinTask = PumpWebSocketToStreamAsync(webSocket, process.StandardInput, null, cancellationToken);
 
         await Task.WhenAny(stdoutTask, stderrTask, stdinTask, process.WaitForExitAsync(cancellationToken));
 
@@ -409,6 +446,33 @@ public sealed class DockerSandboxRuntime : ISandboxRuntime
         catch
         {
         }
+
+        if (webSocket.State is WebSocketState.Open or WebSocketState.CloseReceived)
+        {
+            try
+            {
+                await webSocket.CloseAsync(WebSocketCloseStatus.NormalClosure, "terminal closed", CancellationToken.None);
+            }
+            catch
+            {
+            }
+        }
+    }
+
+    private async Task RunWindowsTerminalSessionAsync(string containerName, WebSocket webSocket, CancellationToken cancellationToken)
+    {
+        using var process = WindowsConPtyProcess.Start(_options.DockerCommand,
+            ["exec", "-it", containerName, "sh", "-lc", "export TERM=xterm-256color; if command -v bash >/dev/null 2>&1; then exec bash -i; else exec sh -i; fi"],
+            120,
+            30);
+
+        using var sendLock = new SemaphoreSlim(1, 1);
+        var outputTask = PumpStreamToWebSocketAsync(process.OutputStream, webSocket, sendLock, cancellationToken);
+        var inputTask = PumpWebSocketToStreamAsync(webSocket, process.InputWriter, process.Resize, cancellationToken);
+
+        await Task.WhenAny(outputTask, inputTask, process.WaitForExitAsync(cancellationToken));
+
+        process.Terminate();
 
         if (webSocket.State is WebSocketState.Open or WebSocketState.CloseReceived)
         {
@@ -640,21 +704,89 @@ public sealed class DockerSandboxRuntime : ISandboxRuntime
         }
     }
 
-    private static async Task PumpWebSocketToStreamAsync(WebSocket webSocket, StreamWriter writer, CancellationToken cancellationToken)
+    private static async Task PumpWebSocketToStreamAsync(WebSocket webSocket, StreamWriter writer, Action<int, int>? resizeCallback, CancellationToken cancellationToken)
     {
         var buffer = new byte[4096];
         while (!cancellationToken.IsCancellationRequested && webSocket.State == WebSocketState.Open)
         {
-            var result = await webSocket.ReceiveAsync(buffer.AsMemory(0, buffer.Length), cancellationToken);
-            if (result.MessageType == WebSocketMessageType.Close)
+            using var messageBuffer = new MemoryStream();
+            bool endOfMessage;
+            do
             {
-                break;
+                var result = await webSocket.ReceiveAsync(buffer.AsMemory(0, buffer.Length), cancellationToken);
+                if (result.MessageType == WebSocketMessageType.Close)
+                {
+                    return;
+                }
+
+                messageBuffer.Write(buffer, 0, result.Count);
+                endOfMessage = result.EndOfMessage;
+            }
+            while (!endOfMessage);
+
+            var text = Encoding.UTF8.GetString(messageBuffer.GetBuffer(), 0, (int)messageBuffer.Length);
+            if (await TryHandleTerminalClientMessageAsync(text, writer, resizeCallback, cancellationToken))
+            {
+                continue;
             }
 
-            var text = Encoding.UTF8.GetString(buffer, 0, result.Count);
             await writer.WriteAsync(text);
             await writer.FlushAsync(cancellationToken);
         }
+    }
+
+    private static async Task<bool> TryHandleTerminalClientMessageAsync(string payload, StreamWriter writer, Action<int, int>? resizeCallback, CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrWhiteSpace(payload) || payload[0] != '{')
+        {
+            return false;
+        }
+
+        TerminalClientMessage? message;
+        try
+        {
+            message = JsonSerializer.Deserialize<TerminalClientMessage>(payload, JsonOptions);
+        }
+        catch (JsonException)
+        {
+            return false;
+        }
+
+        if (message == null)
+        {
+            return false;
+        }
+
+        if (string.Equals(message.Type, "input", StringComparison.OrdinalIgnoreCase))
+        {
+            if (!string.IsNullOrEmpty(message.Data))
+            {
+                await writer.WriteAsync(message.Data);
+                await writer.FlushAsync(cancellationToken);
+            }
+
+            return true;
+        }
+
+        if (string.Equals(message.Type, "resize", StringComparison.OrdinalIgnoreCase))
+        {
+            if (message.Cols is > 0 && message.Rows is > 0)
+            {
+                resizeCallback?.Invoke(message.Cols.Value, message.Rows.Value);
+            }
+
+            return true;
+        }
+
+        return false;
+    }
+
+    private sealed class TerminalClientMessage
+    {
+        public string? Type { get; set; }
+        public string? Data { get; set; }
+        public int? Cols { get; set; }
+        public int? Rows { get; set; }
     }
 
     private static bool ContainsNoSuchContainer(string message)

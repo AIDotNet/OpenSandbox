@@ -131,6 +131,34 @@ public sealed class OpenSandboxGateway(IHttpClientFactory httpClientFactory)
         return true;
     }
 
+    public async Task<bool> MovePathAsync(string baseUrl, string token, string sandboxId, MovePathRequest body, CancellationToken cancellationToken)
+    {
+        using var request = CreateJsonRequest(HttpMethod.Post, Combine(baseUrl, $"/v1/sandboxes/{sandboxId}/files/move"), token, body);
+        using var client = httpClientFactory.CreateClient(nameof(OpenSandboxGateway));
+        using var response = await client.SendAsync(request, cancellationToken);
+        if (response.StatusCode == System.Net.HttpStatusCode.NotFound)
+        {
+            return false;
+        }
+
+        await EnsureSuccessAsync(response, $"Move path '{body.SourcePath}' to '{body.DestinationPath}' for sandbox '{sandboxId}'", cancellationToken);
+        return true;
+    }
+
+    public async Task<bool> CopyPathAsync(string baseUrl, string token, string sandboxId, CopyPathRequest body, CancellationToken cancellationToken)
+    {
+        using var request = CreateJsonRequest(HttpMethod.Post, Combine(baseUrl, $"/v1/sandboxes/{sandboxId}/files/copy"), token, body);
+        using var client = httpClientFactory.CreateClient(nameof(OpenSandboxGateway));
+        using var response = await client.SendAsync(request, cancellationToken);
+        if (response.StatusCode == System.Net.HttpStatusCode.NotFound)
+        {
+            return false;
+        }
+
+        await EnsureSuccessAsync(response, $"Copy path '{body.SourcePath}' to '{body.DestinationPath}' for sandbox '{sandboxId}'", cancellationToken);
+        return true;
+    }
+
     public async Task<bool> DeletePathAsync(string baseUrl, string token, string sandboxId, string path, bool recursive, CancellationToken cancellationToken)
     {
         using var request = new HttpRequestMessage(HttpMethod.Delete, Combine(baseUrl, $"/v1/sandboxes/{sandboxId}/files?path={Uri.EscapeDataString(path)}&recursive={recursive.ToString().ToLowerInvariant()}"));

@@ -10,8 +10,8 @@ export function ContainerRouteTabs({ activeTab, onChange }: ContainerRouteTabsPr
   const tabs: Array<{ key: ContainerTab; label: string }> = [
     { key: "overview", label: "现有概况" },
     { key: "logs", label: "日志" },
-    { key: "terminal", label: "终端" },
-    { key: "files", label: "文件管理系统" },
+    { key: "terminal", label: "SSH / 终端" },
+    { key: "files", label: "文件管理" },
   ]
 
   return (

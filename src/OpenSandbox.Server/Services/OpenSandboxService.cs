@@ -264,6 +264,32 @@ public sealed class OpenSandboxService(
         return true;
     }
 
+    public async Task<bool> MovePathAsync(string id, MovePathRequest request, CancellationToken cancellationToken)
+    {
+        var record = await GetActiveRecordAsync(id, cancellationToken);
+        if (record == null)
+        {
+            return false;
+        }
+
+        await RefreshRecordAsync(record, cancellationToken, save: true);
+        await runtime.MovePathAsync(record.ContainerName, request.SourcePath, request.DestinationPath, cancellationToken);
+        return true;
+    }
+
+    public async Task<bool> CopyPathAsync(string id, CopyPathRequest request, CancellationToken cancellationToken)
+    {
+        var record = await GetActiveRecordAsync(id, cancellationToken);
+        if (record == null)
+        {
+            return false;
+        }
+
+        await RefreshRecordAsync(record, cancellationToken, save: true);
+        await runtime.CopyPathAsync(record.ContainerName, request.SourcePath, request.DestinationPath, cancellationToken);
+        return true;
+    }
+
     public async Task<bool> DeletePathAsync(string id, string path, bool recursive, CancellationToken cancellationToken)
     {
         var record = await GetActiveRecordAsync(id, cancellationToken);
