@@ -36,6 +36,12 @@ public sealed class OpenSandboxService(
             Metadata = request.Metadata == null ? null : new Dictionary<string, string>(request.Metadata),
             Env = request.Env == null ? null : new Dictionary<string, string>(request.Env),
             Volumes = request.Volumes?.Select(MapVolume).ToList(),
+            NetworkPolicy = request.NetworkPolicy == null
+                ? null
+                : new SandboxNetworkPolicy
+                {
+                    DefaultAction = request.NetworkPolicy.DefaultAction ?? string.Empty
+                },
             ResourceLimits = request.ResourceLimits == null
                 ? null
                 : new SandboxResourceLimits
@@ -580,7 +586,8 @@ public sealed class OpenSandboxService(
             CreatedAt = record.CreatedAt,
             ExpiresAt = record.ExpiresAt,
             NeverExpires = record.NeverExpires,
-            Entrypoint = record.Entrypoint.ToList()
+            Entrypoint = record.Entrypoint.ToList(),
+            NetworkPolicy = MapNetworkPolicy(record)
         };
     }
 
@@ -596,8 +603,19 @@ public sealed class OpenSandboxService(
             Status = ToStatus(record),
             CreatedAt = record.CreatedAt,
             ExpiresAt = record.ExpiresAt,
-            NeverExpires = record.NeverExpires
+            NeverExpires = record.NeverExpires,
+            NetworkPolicy = MapNetworkPolicy(record)
         };
+    }
+
+    private static NetworkPolicy? MapNetworkPolicy(SandboxRecord record)
+    {
+        return record.NetworkPolicy == null
+            ? null
+            : new NetworkPolicy
+            {
+                DefaultAction = record.NetworkPolicy.DefaultAction
+            };
     }
 
     private static SandboxStatus ToStatus(SandboxRecord record)

@@ -68,6 +68,7 @@ public sealed class SandboxInfoResponse
     public DateTimeOffset? CreatedAt { get; set; }
     public DateTimeOffset? ExpiresAt { get; set; }
     public bool NeverExpires { get; set; }
+    public NetworkPolicy? NetworkPolicy { get; set; }
 }
 
 public sealed class CreateSandboxResponse
@@ -80,6 +81,7 @@ public sealed class CreateSandboxResponse
     public DateTimeOffset? CreatedAt { get; set; }
     public bool NeverExpires { get; set; }
     public List<string> Entrypoint { get; set; } = new();
+    public NetworkPolicy? NetworkPolicy { get; set; }
 }
 
 public sealed class PaginationInfo

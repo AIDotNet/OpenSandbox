@@ -24,3 +24,21 @@ public sealed class SandboxVolumeSpec
     public string? SubPath { get; set; }
     public SandboxHostVolume? Host { get; set; }
 }
+
+public sealed class SandboxNetworkPolicy
+{
+    /// <summary>
+    /// Allowed values (case-insensitive):
+    /// - "Allow":    default Docker bridge network, outbound access allowed (previous behavior)
+    /// - "Deny":     run with --network none, no networking at all
+    /// - "Internal": attach to an internal Docker network, no outbound access but container-to-container allowed
+    /// </summary>
+    public string DefaultAction { get; set; } = "Allow";
+}
+
+public enum SandboxNetworkMode
+{
+    Bridge,
+    None,
+    Internal
+}

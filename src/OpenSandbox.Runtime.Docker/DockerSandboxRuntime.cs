@@ -35,10 +35,27 @@ public sealed class DockerSandboxRuntime : ISandboxRuntime
             "--label", $"opensandbox.id={record.Id}"
         };
 
-        foreach (var port in _options.PublishedPorts.Distinct())
+        var networkMode = ResolveNetworkMode(record.NetworkPolicy);
+        if (networkMode == SandboxNetworkMode.None)
         {
-            arguments.Add("-p");
-            arguments.Add($"0:{port}");
+            // --network none conflicts with --publish, and an isolated sandbox has no reachable endpoints anyway.
+            arguments.Add("--network");
+            arguments.Add("none");
+        }
+        else
+        {
+            foreach (var port in _options.PublishedPorts.Distinct())
+            {
+                arguments.Add("-p");
+                arguments.Add($"0:{port}");
+            }
+
+            if (networkMode == SandboxNetworkMode.Internal)
+            {
+                var networkName = await EnsureInternalNetworkAsync(cancellationToken);
+                arguments.Add("--network");
+                arguments.Add(networkName);
+            }
         }
 
         var cpuLimit = ConvertCpu(record.ResourceLimits?.Cpu);
@@ -575,6 +592,55 @@ public sealed class DockerSandboxRuntime : ISandboxRuntime
         var process = new Process { StartInfo = startInfo };
         process.Start();
         return process;
+    }
+
+    internal static SandboxNetworkMode ResolveNetworkMode(SandboxNetworkPolicy? policy)
+    {
+        var action = policy?.DefaultAction?.Trim();
+        if (string.IsNullOrWhiteSpace(action)
+            || string.Equals(action, "Allow", StringComparison.OrdinalIgnoreCase)
+            || string.Equals(action, "Default", StringComparison.OrdinalIgnoreCase))
+        {
+            return SandboxNetworkMode.Bridge;
+        }
+
+        if (string.Equals(action, "Deny", StringComparison.OrdinalIgnoreCase)
+            || string.Equals(action, "None", StringComparison.OrdinalIgnoreCase))
+        {
+            return SandboxNetworkMode.None;
+        }
+
+        if (string.Equals(action, "Internal", StringComparison.OrdinalIgnoreCase))
+        {
+            return SandboxNetworkMode.Internal;
+        }
+
+        throw new InvalidOperationException($"Unsupported networkPolicy.defaultAction '{action}'. Supported values: Allow, Deny, Internal.");
+    }
+
+    private async Task<string> EnsureInternalNetworkAsync(CancellationToken cancellationToken)
+    {
+        var networkName = _options.InternalNetworkName;
+        var inspect = await ExecuteProcessAsync(["network", "inspect", networkName], cancellationToken, throwOnError: false);
+        if (inspect.ExitCode == 0)
+        {
+            return networkName;
+        }
+
+        var create = await ExecuteProcessAsync(["network", "create", "--internal", networkName], cancellationToken, throwOnError: false);
+        if (create.ExitCode == 0)
+        {
+            return networkName;
+        }
+
+        // Another concurrent creator may have won the race.
+        inspect = await ExecuteProcessAsync(["network", "inspect", networkName], cancellationToken, throwOnError: false);
+        if (inspect.ExitCode == 0)
+        {
+            return networkName;
+        }
+
+        throw new InvalidOperationException($"Failed to create internal Docker network '{networkName}': {create.StdErr}");
     }
 
     private static SandboxRuntimeState MapState(DockerStateResponse? state)

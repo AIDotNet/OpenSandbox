@@ -10,6 +10,7 @@ public sealed class SandboxRecord
     public Dictionary<string, string>? Metadata { get; set; }
     public Dictionary<string, string>? Env { get; set; }
     public List<SandboxVolumeSpec>? Volumes { get; set; }
+    public SandboxNetworkPolicy? NetworkPolicy { get; set; }
     public SandboxResourceLimits? ResourceLimits { get; set; }
     public int? TimeoutSeconds { get; set; }
     public bool NeverExpires { get; set; }

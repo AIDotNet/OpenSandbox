@@ -6,6 +6,12 @@ public sealed class DockerRuntimeOptions
 
     public string DockerCommand { get; set; } = "docker";
 
+    /// <summary>
+    /// Name of the shared Docker network used by sandboxes created with networkPolicy.defaultAction = "Internal".
+    /// Created on demand with --internal (no outbound access, container-to-container allowed).
+    /// </summary>
+    public string InternalNetworkName { get; set; } = "opensandbox-internal";
+
     public List<int> PublishedPorts { get; set; } =
     [
         80,
